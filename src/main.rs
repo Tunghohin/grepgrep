@@ -1,3 +1,5 @@
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 //! grepgrep - A modern audio transcription tool
 //!
 //! This application provides:
@@ -20,7 +22,7 @@ const APP_ICON_SIZE: u32 = 256;
 /// grepgrep - A tool for transcribing audio
 #[derive(Parser, Debug)]
 #[command(name = "grepgrep")]
-#[command(author = "Developer")]
+#[command(author)]
 #[command(version)]
 #[command(about = "A modern audio transcription tool", long_about = None)]
 struct Args {

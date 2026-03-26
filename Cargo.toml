@@ -3,7 +3,7 @@ name = "grepgrep"
 version = "0.1.0"
 edition = "2021"
 description = "A modern audio transcription tool"
-authors = ["Developer"]
+authors = ["Tunghohin"]
 
 [dependencies]
 # GUI Framework
@@ -16,9 +16,6 @@ clap = { version = "4.5", features = ["derive"] }
 # Audio Processing
 symphonia = { version = "0.5", features = ["all"] }
 cpal = "0.15"
-
-# Time-stretching (maintains pitch while changing speed)
-rubato = "0.15"
 
 # Analysis
 rustfft = "6.2"

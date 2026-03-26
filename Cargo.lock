@@ -1761,7 +1761,6 @@ dependencies = [
  "parking_lot",
  "realfft",
  "rfd",
- "rubato",
  "rustfft",
  "symphonia",
  "thiserror 2.0.18",
@@ -3219,18 +3218,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rubato"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5d18b486e7d29a408ef3f825bc1327d8f87af091c987ca2f5b734625940e234"
-dependencies = [
- "num-complex",
- "num-integer",
- "num-traits",
- "realfft",
 ]
 
 [[package]]

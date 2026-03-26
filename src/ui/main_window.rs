@@ -245,7 +245,9 @@ impl eframe::App for MainWindow {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new("Space: Play/Pause | Ctrl+O: Open File | Drag on waveform to select loop region")
+                        RichText::new(
+                            "Space: Play/Pause | Click timeline/waveform: Play from position | Drag waveform: Select loop | Ctrl+Click: Add tag | Click tag: Play | Double-click tag: Rename"
+                        )
                             .color(text_muted)
                             .size(11.0)
                     );

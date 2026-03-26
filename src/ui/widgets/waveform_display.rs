@@ -423,7 +423,16 @@ impl<'a> WaveformDisplay<'a> {
                         return true;
                     }
 
-                    if hovered_tag_id.is_some() {
+                    if let Some(tag_id) = hovered_tag_id {
+                        if let Some(tag) = self.state.timeline_tag(tag_id) {
+                            self.state.seek(tag.time);
+                            self.state.sync_loop_state();
+
+                            if let Some(player) = &self.state.audio_player {
+                                let _ = player.play();
+                            }
+                        }
+
                         return true;
                     }
                 }
@@ -505,6 +514,21 @@ impl<'a> WaveformDisplay<'a> {
 
         if response.double_clicked() {
             self.state.clear_loop();
+            return;
+        }
+
+        if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if rect.contains(pos) {
+                    let time = self.waveform_x_to_time(rect, pos.x);
+                    self.state.seek(time);
+                    self.state.sync_loop_state();
+
+                    if let Some(player) = &self.state.audio_player {
+                        let _ = player.play();
+                    }
+                }
+            }
         }
     }
 

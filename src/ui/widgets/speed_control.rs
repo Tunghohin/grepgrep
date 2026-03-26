@@ -72,14 +72,6 @@ impl<'a> SpeedControl<'a> {
                     .color(self.theme.accent)
                     .monospace(),
             );
-
-            ui.add_space(5.0);
-
-            ui.label(
-                RichText::new("Note: speed changes now preserve pitch")
-                    .color(self.theme.text_muted)
-                    .size(11.0),
-            );
         });
     }
 }

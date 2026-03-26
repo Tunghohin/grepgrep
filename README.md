@@ -4,9 +4,9 @@
 
 # grepgrep
 
-`grepgrep` is a desktop audio transcription player.
+`grepgrep` is a desktop audio practice and transcription app for musicians.
 
-It is designed for listening to speech repeatedly, slowing playback down without changing pitch, viewing the waveform, and looping short sections while transcribing or practicing.
+It is designed for learning songs by ear, slowing audio down without changing pitch, viewing the waveform, looping difficult sections, and navigating quickly while practicing or transcribing.
 
 ## Features
 

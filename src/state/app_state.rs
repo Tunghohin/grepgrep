@@ -34,6 +34,17 @@ impl LoopRegion {
 
 }
 
+/// Named marker on the audio timeline.
+#[derive(Debug, Clone)]
+pub struct TimelineTag {
+    /// Stable identifier used for editing and hit-testing.
+    pub id: u64,
+    /// Tag position in seconds.
+    pub time: f64,
+    /// User-visible name.
+    pub name: String,
+}
+
 /// Application state
 pub struct AppState {
     /// Currently loaded file path
@@ -64,6 +75,16 @@ pub struct AppState {
     pub zoom: f32,
     /// Scroll offset in seconds
     pub scroll_offset: f64,
+    /// Timeline markers shown on the waveform and seek bar.
+    pub timeline_tags: Vec<TimelineTag>,
+    /// Incrementing id for new timeline tags.
+    pub next_timeline_tag_id: u64,
+    /// Tag currently being renamed.
+    pub editing_timeline_tag_id: Option<u64>,
+    /// Inline editor text for the active tag rename.
+    pub timeline_tag_editor_text: String,
+    /// Request focus for the inline tag editor on the next frame.
+    pub timeline_tag_editor_needs_focus: bool,
 }
 
 impl Default for AppState {
@@ -83,6 +104,11 @@ impl Default for AppState {
             error: None,
             zoom: 1.0,
             scroll_offset: 0.0,
+            timeline_tags: Vec::new(),
+            next_timeline_tag_id: 1,
+            editing_timeline_tag_id: None,
+            timeline_tag_editor_text: String::new(),
+            timeline_tag_editor_needs_focus: false,
         }
     }
 }
@@ -202,6 +228,58 @@ impl AppState {
             None
         }
     }
+
+    /// Add a new timeline tag at the given position and return its id.
+    pub fn add_timeline_tag(&mut self, position: f64) -> u64 {
+        let id = self.next_timeline_tag_id;
+        self.next_timeline_tag_id += 1;
+
+        let tag = TimelineTag {
+            id,
+            time: position.clamp(0.0, self.duration),
+            name: format!("Tag {}", id),
+        };
+
+        self.timeline_tags.push(tag);
+        self.timeline_tags
+            .sort_by(|left, right| left.time.total_cmp(&right.time));
+
+        id
+    }
+
+    /// Look up a tag by id.
+    pub fn timeline_tag(&self, id: u64) -> Option<&TimelineTag> {
+        self.timeline_tags.iter().find(|tag| tag.id == id)
+    }
+
+    /// Begin inline editing for a timeline tag.
+    pub fn begin_timeline_tag_edit(&mut self, id: u64) {
+        if let Some(name) = self.timeline_tag(id).map(|tag| tag.name.clone()) {
+            self.editing_timeline_tag_id = Some(id);
+            self.timeline_tag_editor_text = name;
+            self.timeline_tag_editor_needs_focus = true;
+        }
+    }
+
+    /// Finish timeline tag editing, optionally applying the current editor text.
+    pub fn finish_timeline_tag_edit(&mut self, apply: bool) {
+        if apply {
+            if let Some(id) = self.editing_timeline_tag_id {
+                if let Some(tag) = self.timeline_tags.iter_mut().find(|tag| tag.id == id) {
+                    let trimmed = self.timeline_tag_editor_text.trim();
+                    tag.name = if trimmed.is_empty() {
+                        format_time(tag.time)
+                    } else {
+                        trimmed.to_string()
+                    };
+                }
+            }
+        }
+
+        self.editing_timeline_tag_id = None;
+        self.timeline_tag_editor_text.clear();
+        self.timeline_tag_editor_needs_focus = false;
+    }
 }
 
 /// Format time in seconds to MM:SS.ms format
@@ -256,5 +334,43 @@ mod tests {
         assert!(!loop_region.enabled);
         assert!(!buffer.loop_enabled());
         assert_eq!(buffer.loop_bounds(), None);
+    }
+
+    #[test]
+    fn timeline_tags_are_inserted_in_time_order() {
+        let mut state = AppState::new();
+        state.duration = 12.0;
+
+        state.add_timeline_tag(8.0);
+        state.add_timeline_tag(2.0);
+        state.add_timeline_tag(5.0);
+
+        let times = state
+            .timeline_tags
+            .iter()
+            .map(|tag| tag.time)
+            .collect::<Vec<_>>();
+
+        assert_eq!(times, vec![2.0, 5.0, 8.0]);
+    }
+
+    #[test]
+    fn finishing_tag_edit_uses_new_name() {
+        let mut state = AppState::new();
+        state.duration = 12.0;
+        let tag_id = state.add_timeline_tag(3.5);
+
+        state.begin_timeline_tag_edit(tag_id);
+        state.timeline_tag_editor_text = "Verse In".to_string();
+        state.finish_timeline_tag_edit(true);
+
+        assert_eq!(
+            state
+                .timeline_tag(tag_id)
+                .expect("tag should still exist")
+                .name,
+            "Verse In"
+        );
+        assert_eq!(state.editing_timeline_tag_id, None);
     }
 }

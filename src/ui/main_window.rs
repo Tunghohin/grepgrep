@@ -98,6 +98,11 @@ impl MainWindow {
                 self.state.loop_selection_start = None;
                 self.state.zoom = 1.0;
                 self.state.scroll_offset = 0.0;
+                self.state.timeline_tags.clear();
+                self.state.next_timeline_tag_id = 1;
+                self.state.editing_timeline_tag_id = None;
+                self.state.timeline_tag_editor_text.clear();
+                self.state.timeline_tag_editor_needs_focus = false;
 
                 tracing::info!("Loaded audio file: {} ({}s)", path, self.state.duration);
             }

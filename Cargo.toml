@@ -1,0 +1,73 @@
+[package]
+name = "grepgrep"
+version = "0.1.0"
+edition = "2021"
+description = "A modern audio transcription tool"
+authors = ["Developer"]
+
+[dependencies]
+# GUI Framework
+egui = "0.29"
+eframe = "0.29"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Audio Processing
+symphonia = { version = "0.5", features = ["all"] }
+cpal = "0.15"
+
+# Time-stretching (maintains pitch while changing speed)
+rubato = "0.15"
+
+# Analysis
+rustfft = "6.2"
+realfft = "3.4"
+num-complex = "0.4"
+
+# Concurrency & Utilities
+crossbeam = "0.8"
+parking_lot = "0.12"
+anyhow = "1.0"
+thiserror = "2.0"
+
+# File Dialog
+rfd = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+# Windows-specific dependencies
+winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-specific dependencies for audio
+libpulse-binding = { version = "2.28", optional = true }
+libpulse-simple-binding = { version = "2.28", optional = true }
+
+[features]
+default = []
+# Windows-specific features
+windows-optimized = ["winapi"]
+# Linux-specific features
+linux-pulseaudio = ["libpulse-binding", "libpulse-simple-binding"]
+# Development features
+dev = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# Cross-compilation profiles
+[profile.release-windows]
+inherits = "release"
+opt-level = 3
+lto = true
+
+[profile.release-linux]
+inherits = "release"
+opt-level = 3
+lto = true

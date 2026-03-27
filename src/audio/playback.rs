@@ -8,7 +8,7 @@ use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
-use super::buffer::AudioBuffer;
+use super::buffer::{AudioBuffer, AudioChannelMode};
 
 /// Playback state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +221,16 @@ impl AudioPlayer {
         self.speed.load(Ordering::SeqCst) as f32 / 1000.0
     }
 
+    /// Set source-channel playback mode.
+    pub fn set_channel_mode(&self, mode: AudioChannelMode) {
+        self.buffer.set_channel_mode(mode);
+    }
+
+    /// Get current source-channel playback mode.
+    pub fn channel_mode(&self) -> AudioChannelMode {
+        self.buffer.channel_mode()
+    }
+
     /// Seek to position (in duration)
     pub fn seek_time(&self, time: std::time::Duration) {
         self.buffer.set_position_time(time);
@@ -264,5 +274,17 @@ mod tests {
         player.play().expect("play should succeed without a stream");
 
         assert_eq!(buffer.position_time(), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn channel_mode_updates_are_forwarded_to_buffer() {
+        let buffer = Arc::new(AudioBuffer::new(vec![0.0; 16], 2, 48_000));
+        let player =
+            AudioPlayer::new(buffer.clone()).expect("player should initialize without a stream");
+
+        player.set_channel_mode(AudioChannelMode::Right);
+
+        assert_eq!(player.channel_mode(), AudioChannelMode::Right);
+        assert_eq!(buffer.channel_mode(), AudioChannelMode::Right);
     }
 }

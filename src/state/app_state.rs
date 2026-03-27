@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::analysis::WaveformGenerator;
-use crate::audio::{AudioBuffer, AudioPlayer};
+use crate::audio::{AudioBuffer, AudioChannelMode, AudioPlayer};
 
 /// Loop region state
 #[derive(Debug, Clone, Copy, Default)]
@@ -31,7 +31,6 @@ impl LoopRegion {
     pub fn duration(&self) -> f64 {
         self.end - self.start
     }
-
 }
 
 /// Named marker on the audio timeline.
@@ -63,6 +62,8 @@ pub struct AppState {
     pub volume: f32,
     /// Playback speed (0.1 to 2.0, 1.0 = normal)
     pub speed: f32,
+    /// Selected source-channel playback mode.
+    pub channel_mode: AudioChannelMode,
     /// Loop region
     pub loop_region: Option<LoopRegion>,
     /// Whether we're currently selecting a loop region
@@ -98,6 +99,7 @@ impl Default for AppState {
             duration: 0.0,
             volume: 1.0,
             speed: 1.0,
+            channel_mode: AudioChannelMode::Stereo,
             loop_region: None,
             selecting_loop: false,
             loop_selection_start: None,
@@ -150,6 +152,14 @@ impl AppState {
         self.speed = speed.clamp(0.1, 2.0);
         if let Some(player) = &self.audio_player {
             player.set_speed(self.speed);
+        }
+    }
+
+    /// Set source-channel playback mode.
+    pub fn set_channel_mode(&mut self, mode: AudioChannelMode) {
+        self.channel_mode = mode;
+        if let Some(player) = &self.audio_player {
+            player.set_channel_mode(self.channel_mode);
         }
     }
 
@@ -313,6 +323,24 @@ mod tests {
         assert!((state.speed - 2.0).abs() < 0.001);
         assert!((player.speed() - 2.0).abs() < 0.001);
         assert!((buffer.speed() - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn channel_mode_changes_are_forwarded_to_player() {
+        let mut state = AppState::new();
+        let buffer = Arc::new(AudioBuffer::new(vec![0.0; 64], 2, 48_000));
+        let player = Arc::new(
+            crate::audio::AudioPlayer::new(buffer.clone()).expect("player should initialize"),
+        );
+
+        state.audio_buffer = Some(buffer.clone());
+        state.audio_player = Some(player.clone());
+
+        state.set_channel_mode(AudioChannelMode::Left);
+
+        assert_eq!(state.channel_mode, AudioChannelMode::Left);
+        assert_eq!(player.channel_mode(), AudioChannelMode::Left);
+        assert_eq!(buffer.channel_mode(), AudioChannelMode::Left);
     }
 
     #[test]

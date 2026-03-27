@@ -9,6 +9,6 @@ pub mod buffer;
 pub mod decoder;
 pub mod playback;
 
-pub use buffer::AudioBuffer;
+pub use buffer::{AudioBuffer, AudioChannelMode};
 pub use decoder::AudioDecoder;
 pub use playback::AudioPlayer;

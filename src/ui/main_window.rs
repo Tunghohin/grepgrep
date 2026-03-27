@@ -1,13 +1,15 @@
 //! Main window layout
 
-use egui::{Button, CentralPanel, RichText, SidePanel, Slider, TopBottomPanel};
+use egui::{Button, CentralPanel, ComboBox, RichText, SidePanel, Slider, TopBottomPanel};
 use std::sync::Arc;
 
 use crate::analysis::WaveformGenerator;
-use crate::audio::{AudioBuffer, AudioDecoder, AudioPlayer};
+use crate::audio::{AudioBuffer, AudioChannelMode, AudioDecoder, AudioPlayer};
 use crate::state::AppState;
 use crate::ui::theme::Theme;
-use crate::ui::widgets::{LoopControl, PlaybackControls, SpeedControl, TimeDisplay, WaveformDisplay};
+use crate::ui::widgets::{
+    LoopControl, PlaybackControls, SpeedControl, TimeDisplay, WaveformDisplay,
+};
 
 /// Main application window
 pub struct MainWindow {
@@ -79,6 +81,7 @@ impl MainWindow {
                 // Carry current playback settings into the new player.
                 player.set_volume(self.state.volume);
                 player.set_speed(self.state.speed);
+                player.set_channel_mode(self.state.channel_mode);
 
                 let player = Arc::new(player);
 
@@ -209,6 +212,47 @@ impl eframe::App for MainWindow {
                 ui.collapsing("Speed", |ui| {
                     SpeedControl::new(&mut self.state, &theme).show(ui);
                 });
+
+                ui.add_space(10.0);
+
+                // Channel control
+                ui.collapsing("Channel", |ui| {
+                    let mut channel_mode = self.state.channel_mode;
+                    ComboBox::from_label("Mode")
+                        .selected_text(match channel_mode {
+                            AudioChannelMode::Stereo => "Stereo",
+                            AudioChannelMode::Left => "Left",
+                            AudioChannelMode::Right => "Right",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut channel_mode,
+                                AudioChannelMode::Stereo,
+                                "Stereo",
+                            );
+                            ui.selectable_value(&mut channel_mode, AudioChannelMode::Left, "Left");
+                            ui.selectable_value(
+                                &mut channel_mode,
+                                AudioChannelMode::Right,
+                                "Right",
+                            );
+                        });
+                    self.state.set_channel_mode(channel_mode);
+
+                    if self
+                        .state
+                        .audio_buffer
+                        .as_ref()
+                        .map(|buffer| buffer.channel_count() <= 1)
+                        .unwrap_or(false)
+                    {
+                        ui.label(
+                            RichText::new("Mono files sound the same in every mode.")
+                                .color(text_muted)
+                                .size(12.0),
+                        );
+                    }
+                });
             });
 
         // Bottom panel - playback controls
@@ -302,6 +346,7 @@ impl eframe::App for MainWindow {
                         "- Waveform visualization with selection",
                         "- Loop region for repeated practice",
                         "- Volume control",
+                        "- Left / right / stereo channel selection",
                     ] {
                         ui.label(RichText::new(*feature).color(text_muted).size(12.0));
                     }

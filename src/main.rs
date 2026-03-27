@@ -1,4 +1,7 @@
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 //! grepgrep - A modern audio transcription tool
 //!
@@ -144,8 +147,8 @@ fn render_logo_icon(svg: &str, size: u32) -> Result<egui::IconData> {
     let circle_tag =
         extract_tag(svg, "circle").ok_or_else(|| anyhow::anyhow!("missing <circle> tag"))?;
 
-    let view_box = extract_attr(root_tag, "viewBox")
-        .ok_or_else(|| anyhow::anyhow!("missing svg viewBox"))?;
+    let view_box =
+        extract_attr(root_tag, "viewBox").ok_or_else(|| anyhow::anyhow!("missing svg viewBox"))?;
     let [min_x, min_y, view_width, view_height] = parse_view_box(view_box)?;
 
     let cx = extract_attr(circle_tag, "cx")
@@ -157,8 +160,8 @@ fn render_logo_icon(svg: &str, size: u32) -> Result<egui::IconData> {
     let radius = extract_attr(circle_tag, "r")
         .ok_or_else(|| anyhow::anyhow!("missing circle r"))?
         .parse::<f32>()?;
-    let fill = extract_attr(circle_tag, "fill")
-        .ok_or_else(|| anyhow::anyhow!("missing circle fill"))?;
+    let fill =
+        extract_attr(circle_tag, "fill").ok_or_else(|| anyhow::anyhow!("missing circle fill"))?;
     let color = parse_hex_color(fill)?;
 
     Ok(fallback_icon_with_circle(
@@ -255,7 +258,11 @@ fn fallback_icon_with_circle(
         }
     }
 
-    egui::IconData { rgba, width, height }
+    egui::IconData {
+        rgba,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]

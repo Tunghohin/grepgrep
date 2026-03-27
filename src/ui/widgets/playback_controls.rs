@@ -82,7 +82,6 @@ impl<'a> PlaybackControls<'a> {
             {
                 self.state.toggle_loop_enabled();
             }
-
         });
     }
 }

@@ -60,13 +60,15 @@ impl<'a> WaveformDisplay<'a> {
             .or(seek_response.interact_pointer_pos())
             .or(response.hover_pos())
             .or(seek_response.hover_pos());
-        let hovered_tag_id = pointer_pos.and_then(|pos| self.hit_test_timeline_tag(pos, seek_rect, rect));
+        let hovered_tag_id =
+            pointer_pos.and_then(|pos| self.hit_test_timeline_tag(pos, seek_rect, rect));
 
         self.draw_seek_bar(ui, seek_rect, hovered_tag_id);
 
         // Handle tag interactions before seek/loop interactions so Ctrl+click and double-click
         // on markers do not trigger seek or loop-clearing behavior.
-        let mut consumed = self.handle_tag_interaction(&seek_response, seek_rect, hovered_tag_id, true);
+        let mut consumed =
+            self.handle_tag_interaction(&seek_response, seek_rect, hovered_tag_id, true);
         if !consumed {
             consumed = self.handle_tag_interaction(&response, rect, hovered_tag_id, false);
         }
@@ -151,8 +153,7 @@ impl<'a> WaveformDisplay<'a> {
 
         self.draw_seek_bar_tags(ui.painter(), seek_rect, hovered_tag_id);
 
-        let seek_x =
-            seek_rect.left() + (self.state.position / duration) as f32 * seek_rect.width();
+        let seek_x = seek_rect.left() + (self.state.position / duration) as f32 * seek_rect.width();
         ui.painter().line_segment(
             [
                 Pos2::new(seek_x, seek_rect.top()),
@@ -277,8 +278,8 @@ impl<'a> WaveformDisplay<'a> {
                 continue;
             };
 
-            let is_hovered =
-                Some(tag.id) == hovered_tag_id || Some(tag.id) == self.state.editing_timeline_tag_id;
+            let is_hovered = Some(tag.id) == hovered_tag_id
+                || Some(tag.id) == self.state.editing_timeline_tag_id;
             let color = if is_hovered {
                 self.theme.accent_hover
             } else {
@@ -323,16 +324,15 @@ impl<'a> WaveformDisplay<'a> {
         let font = FontId::proportional(15.0);
         let width = label.chars().count() as f32 * 8.0 + 20.0;
         let label_rect = Rect::from_min_size(
-            Pos2::new((x - width / 2.0).clamp(rect.left() + 4.0, rect.right() - width - 4.0), top),
+            Pos2::new(
+                (x - width / 2.0).clamp(rect.left() + 4.0, rect.right() - width - 4.0),
+                top,
+            ),
             Vec2::new(width, 24.0),
         );
 
         painter.rect_filled(label_rect, 6.0, self.theme.surface);
-        painter.rect_stroke(
-            label_rect,
-            6.0,
-            Stroke::new(1.0, self.theme.accent_hover),
-        );
+        painter.rect_stroke(label_rect, 6.0, Stroke::new(1.0, self.theme.accent_hover));
         painter.text(
             label_rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -618,7 +618,12 @@ impl<'a> WaveformDisplay<'a> {
         ));
     }
 
-    fn show_timeline_tag_editor(&mut self, ctx: &egui::Context, seek_rect: Rect, waveform_rect: Rect) {
+    fn show_timeline_tag_editor(
+        &mut self,
+        ctx: &egui::Context,
+        seek_rect: Rect,
+        waveform_rect: Rect,
+    ) {
         let Some(tag_id) = self.state.editing_timeline_tag_id else {
             return;
         };
@@ -633,7 +638,8 @@ impl<'a> WaveformDisplay<'a> {
             .unwrap_or_else(|| self.tag_x_in_seek_bar(seek_rect, tag.time));
         let editor_width = 180.0;
         let editor_pos = Pos2::new(
-            (editor_x - editor_width / 2.0).clamp(seek_rect.left(), seek_rect.right() - editor_width),
+            (editor_x - editor_width / 2.0)
+                .clamp(seek_rect.left(), seek_rect.right() - editor_width),
             waveform_rect.top() + 24.0,
         );
 
@@ -671,7 +677,12 @@ impl<'a> WaveformDisplay<'a> {
         }
     }
 
-    fn hit_test_timeline_tag(&self, pointer_pos: Pos2, seek_rect: Rect, waveform_rect: Rect) -> Option<u64> {
+    fn hit_test_timeline_tag(
+        &self,
+        pointer_pos: Pos2,
+        seek_rect: Rect,
+        waveform_rect: Rect,
+    ) -> Option<u64> {
         let mut best_match = None;
         let mut best_distance = f32::MAX;
 
@@ -680,18 +691,20 @@ impl<'a> WaveformDisplay<'a> {
             let seek_distance = (pointer_pos.x - seek_x).abs();
             let on_seek_bar = seek_rect.contains(pointer_pos) && seek_distance <= TAG_HIT_RADIUS;
 
-            let waveform_match = self.tag_x_in_waveform(waveform_rect, tag.time).and_then(|wave_x| {
-                let y_min = waveform_rect.top() - 2.0;
-                let y_max = waveform_rect.bottom();
-                let within_y = pointer_pos.y >= y_min && pointer_pos.y <= y_max;
-                let distance = (pointer_pos.x - wave_x).abs();
+            let waveform_match =
+                self.tag_x_in_waveform(waveform_rect, tag.time)
+                    .and_then(|wave_x| {
+                        let y_min = waveform_rect.top() - 2.0;
+                        let y_max = waveform_rect.bottom();
+                        let within_y = pointer_pos.y >= y_min && pointer_pos.y <= y_max;
+                        let distance = (pointer_pos.x - wave_x).abs();
 
-                if within_y && distance <= TAG_HIT_RADIUS {
-                    Some(distance)
-                } else {
-                    None
-                }
-            });
+                        if within_y && distance <= TAG_HIT_RADIUS {
+                            Some(distance)
+                        } else {
+                            None
+                        }
+                    });
 
             let candidate_distance = if on_seek_bar {
                 Some(seek_distance)

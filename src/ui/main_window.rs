@@ -2,13 +2,14 @@
 
 use egui::{Button, CentralPanel, ComboBox, RichText, SidePanel, Slider, TopBottomPanel};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+use tempfile::TempDir;
 
 use crate::analysis::WaveformGenerator;
 use crate::audio::{AudioBuffer, AudioChannelMode, AudioDecoder, AudioPlayer};
-use crate::project::{
-    default_project_directory_name, load_from_directory, save_to_directory, ProjectData,
-};
+use crate::project::{default_project_file_name, load_from_path, save_to_file, ProjectData};
 use crate::state::AppState;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{
@@ -30,6 +31,8 @@ pub struct MainWindow {
     file_path_input: String,
     /// Pending audio file or project to load (to avoid borrow issues)
     pending_load: Option<PendingLoad>,
+    /// Extracted temp directory for the currently open archived project.
+    open_project_tempdir: Option<TempDir>,
 }
 
 impl MainWindow {
@@ -40,6 +43,7 @@ impl MainWindow {
             theme: Theme::default(),
             file_path_input: String::new(),
             pending_load: None,
+            open_project_tempdir: None,
         }
     }
 
@@ -59,32 +63,31 @@ impl MainWindow {
         &mut self,
         path: String,
         project_data: Option<ProjectData>,
-        project_directory: Option<PathBuf>,
+        project_path: Option<PathBuf>,
     ) {
         if let Some(player) = &self.state.audio_player {
             player.stop();
         }
 
+        if project_path.is_none() {
+            self.open_project_tempdir = None;
+        }
+
         match AudioDecoder::decode_file(&path) {
             Ok(decoded) => {
+                let sample_rate = decoded.sample_rate;
+                let channels = decoded.channels;
+                let duration = decoded.duration;
+                let samples: Arc<[f32]> = decoded.samples.into();
+
                 // Create audio buffer
-                let buffer = Arc::new(AudioBuffer::new(
-                    decoded.samples.clone(),
-                    decoded.channels,
-                    decoded.sample_rate,
-                ));
+                let buffer = Arc::new(AudioBuffer::new(samples.clone(), channels, sample_rate));
 
                 // Create waveform generator
-                let waveform = Arc::new(WaveformGenerator::new(
-                    decoded.samples,
-                    decoded.channels,
-                    decoded.sample_rate,
-                ));
+                let waveform = Arc::new(WaveformGenerator::new(samples, channels, sample_rate));
 
                 // Create audio player
-                let mut player = AudioPlayer::new(buffer.clone()).unwrap_or_else(|e| {
-                    panic!("Cannot create audio player: {}", e);
-                });
+                let mut player = AudioPlayer::new(buffer.clone());
 
                 // Initialize the audio stream
                 if let Err(e) = player.init_stream() {
@@ -98,16 +101,13 @@ impl MainWindow {
                 player.set_speed(self.state.speed);
                 player.set_channel_mode(self.state.channel_mode);
 
-                let player = Arc::new(player);
-
-                // Pre-generate waveform levels
-                waveform.generate_multi_resolution(12800);
+                let player = Rc::new(player);
 
                 // Update state
                 self.state.reset_project_state();
-                self.state.duration = decoded.duration.as_secs_f64();
+                self.state.duration = duration.as_secs_f64();
                 self.state.file_path = Some(path.clone());
-                self.state.project_directory = project_directory;
+                self.state.project_path = project_path;
                 self.state.audio_buffer = Some(buffer);
                 self.state.audio_player = Some(player);
                 self.state.waveform = Some(waveform);
@@ -126,44 +126,41 @@ impl MainWindow {
         }
     }
 
-    fn open_project(&mut self, project_dir: PathBuf) {
-        match load_from_directory(&project_dir) {
+    fn open_project(&mut self, project_path: PathBuf) {
+        match load_from_path(&project_path) {
             Ok(loaded_project) => {
+                self.open_project_tempdir = loaded_project.extracted_dir;
                 let audio_path = loaded_project.audio_path.to_string_lossy().to_string();
                 self.file_path_input = audio_path.clone();
                 self.load_audio_file(
                     audio_path,
                     Some(loaded_project.data),
-                    Some(loaded_project.project_dir),
+                    loaded_project.project_path,
                 );
             }
             Err(error) => {
                 self.state.error = Some(format!("Failed to open project: {}", error));
                 tracing::error!(
                     "Failed to open project {}: {}",
-                    project_dir.display(),
+                    project_path.display(),
                     error
                 );
             }
         }
     }
 
-    fn save_project(&mut self, project_dir: PathBuf) {
-        match save_to_directory(&self.state, &project_dir) {
-            Ok(saved_dir) => {
-                if let Some(audio_path) = self.project_audio_path(&saved_dir) {
-                    self.state.file_path = Some(audio_path.to_string_lossy().to_string());
-                    self.file_path_input = audio_path.to_string_lossy().to_string();
-                }
-                self.state.project_directory = Some(saved_dir.clone());
+    fn save_project(&mut self, project_path: PathBuf) {
+        match save_to_file(&self.state, &project_path) {
+            Ok(saved_path) => {
+                self.state.project_path = Some(saved_path.clone());
                 self.state.error = None;
-                tracing::info!("Saved project to {}", saved_dir.display());
+                tracing::info!("Saved project to {}", saved_path.display());
             }
             Err(error) => {
                 self.state.error = Some(format!("Failed to save project: {}", error));
                 tracing::error!(
                     "Failed to save project {}: {}",
-                    project_dir.display(),
+                    project_path.display(),
                     error
                 );
             }
@@ -172,22 +169,27 @@ impl MainWindow {
 
     fn prompt_open_project(&mut self) {
         let mut dialog = rfd::FileDialog::new();
-        if let Some(project_dir) = &self.state.project_directory {
-            dialog = dialog.set_directory(project_dir);
+        if let Some(project_path) = &self.state.project_path {
+            if let Some(parent) = project_path.parent() {
+                dialog = dialog.set_directory(parent);
+            }
         } else if let Some(file_path) = self.state.file_path.as_deref().map(Path::new) {
             if let Some(parent) = file_path.parent() {
                 dialog = dialog.set_directory(parent);
             }
         }
 
-        if let Some(path) = dialog.pick_folder() {
+        if let Some(path) = dialog
+            .add_filter("grepgrep Project", &["ggproj"])
+            .pick_file()
+        {
             self.pending_load = Some(PendingLoad::Project(path));
         }
     }
 
     fn save_project_via_dialog(&mut self) {
-        if let Some(project_dir) = self.state.project_directory.clone() {
-            self.save_project(project_dir);
+        if let Some(project_path) = self.state.project_path.clone() {
+            self.save_project(project_path);
             return;
         }
 
@@ -196,25 +198,18 @@ impl MainWindow {
             return;
         };
 
-        let default_name = default_project_directory_name(audio_path);
+        let default_name = default_project_file_name(audio_path);
         let mut dialog = rfd::FileDialog::new().set_file_name(&default_name);
         if let Some(parent) = audio_path.parent() {
             dialog = dialog.set_directory(parent);
         }
 
-        if let Some(project_dir) = dialog.save_file() {
-            self.save_project(project_dir);
+        if let Some(project_path) = dialog
+            .add_filter("grepgrep Project", &["ggproj"])
+            .save_file()
+        {
+            self.save_project(project_path);
         }
-    }
-
-    fn project_audio_path(&self, project_dir: &Path) -> Option<PathBuf> {
-        let audio_file_name = self
-            .state
-            .file_path
-            .as_deref()
-            .map(Path::new)?
-            .file_name()?;
-        Some(project_dir.join(audio_file_name))
     }
 }
 
@@ -223,8 +218,10 @@ impl eframe::App for MainWindow {
         // Apply theme
         self.theme.apply(ctx);
 
-        // Request continuous repaint for real-time updates
-        ctx.request_repaint();
+        // Keep the UI ticking while playback is active without burning CPU at idle.
+        if self.state.is_playing() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
 
         // Handle pending file or project load
         if let Some(pending_load) = self.pending_load.take() {
@@ -258,10 +255,8 @@ impl eframe::App for MainWindow {
                 ui.text_edit_singleline(&mut self.file_path_input);
 
                 // Open button
-                if ui.add(Button::new("Open")).clicked() {
-                    if !self.file_path_input.is_empty() {
-                        self.pending_load = Some(PendingLoad::Audio(self.file_path_input.clone()));
-                    }
+                if ui.add(Button::new("Open")).clicked() && !self.file_path_input.is_empty() {
+                    self.pending_load = Some(PendingLoad::Audio(self.file_path_input.clone()));
                 }
 
                 // Browse button
@@ -393,13 +388,9 @@ impl eframe::App for MainWindow {
 
             if let Some(waveform) = waveform_opt {
                 // Waveform display
-                WaveformDisplay::new(
-                    &*waveform,
-                    &mut self.state,
-                    &theme,
-                )
-                .height(ui.available_height() - 20.0)
-                .show(ui);
+                WaveformDisplay::new(&waveform, &mut self.state, &theme)
+                    .height(ui.available_height() - 20.0)
+                    .show(ui);
 
                 // Instructions
                 ui.add_space(10.0);
@@ -483,10 +474,8 @@ impl eframe::App for MainWindow {
                     if let Some(player) = &self.state.audio_player {
                         let _ = player.pause();
                     }
-                } else {
-                    if let Some(player) = &self.state.audio_player {
-                        let _ = player.play();
-                    }
+                } else if let Some(player) = &self.state.audio_player {
+                    let _ = player.play();
                 }
             }
 

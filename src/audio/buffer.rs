@@ -3,6 +3,7 @@
 use cpal::Sample;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Source-channel playback mode.
@@ -19,6 +20,8 @@ pub enum AudioChannelMode {
 
 #[derive(Debug, Clone)]
 struct PlaybackEngineState {
+    /// Number of channels expected by the output device.
+    output_channels: usize,
     /// Current logical source position in frames.
     display_position: f64,
     /// Playback speed multiplier.
@@ -44,6 +47,7 @@ struct PlaybackEngineState {
 impl Default for PlaybackEngineState {
     fn default() -> Self {
         Self {
+            output_channels: 1,
             display_position: 0.0,
             speed: 1.0,
             pending_output: Vec::new(),
@@ -61,7 +65,7 @@ impl Default for PlaybackEngineState {
 /// A thread-safe audio buffer for playback.
 pub struct AudioBuffer {
     /// The decoded audio samples (interleaved) - immutable after creation.
-    samples: Vec<f32>,
+    samples: Arc<[f32]>,
     /// Number of channels.
     channels: u16,
     /// Sample rate.
@@ -82,7 +86,11 @@ pub struct AudioBuffer {
 
 impl AudioBuffer {
     /// Create a new audio buffer.
-    pub fn new(samples: Vec<f32>, channels: u16, sample_rate: u32) -> Self {
+    pub fn new<S>(samples: S, channels: u16, sample_rate: u32) -> Self
+    where
+        S: Into<Arc<[f32]>>,
+    {
+        let samples = samples.into();
         let total_samples = samples.len();
         let grain_size_frames =
             (((sample_rate as usize) * 40) / 1000).clamp(1_024, 4_096) / 64 * 64;
@@ -99,7 +107,10 @@ impl AudioBuffer {
             overlap_frames,
             synthesis_hop_frames,
             search_radius_frames,
-            state: Mutex::new(PlaybackEngineState::default()),
+            state: Mutex::new(PlaybackEngineState {
+                output_channels: channels.max(1) as usize,
+                ..PlaybackEngineState::default()
+            }),
         }
     }
 
@@ -143,6 +154,19 @@ impl AudioBuffer {
         Duration::from_secs_f64(self.position() / self.sample_rate as f64)
     }
 
+    /// Set the number of output channels used by the playback device.
+    pub fn set_output_channel_count(&self, channels: usize) {
+        let mut state = self.state.lock();
+        let channels = channels.max(1);
+        if state.output_channels == channels {
+            return;
+        }
+
+        state.output_channels = channels;
+        state.next_grain_source_frame = state.display_position;
+        self.reset_stretcher_state(&mut state);
+    }
+
     /// Set playback speed.
     pub fn set_speed(&self, speed: f32) {
         let mut state = self.state.lock();
@@ -157,6 +181,7 @@ impl AudioBuffer {
     }
 
     /// Get playback speed.
+    #[cfg(test)]
     pub fn speed(&self) -> f32 {
         self.state.lock().speed
     }
@@ -174,16 +199,19 @@ impl AudioBuffer {
     }
 
     /// Get current source-channel playback mode.
+    #[cfg(test)]
     pub fn channel_mode(&self) -> AudioChannelMode {
         self.state.lock().channel_mode
     }
 
     /// Whether loop playback is currently active.
+    #[cfg(test)]
     pub fn loop_enabled(&self) -> bool {
         self.state.lock().loop_enabled
     }
 
     /// Get the current loop bounds in frames.
+    #[cfg(test)]
     pub fn loop_bounds(&self) -> Option<(usize, usize)> {
         let state = self.state.lock();
         if !state.loop_enabled {
@@ -251,15 +279,15 @@ impl AudioBuffer {
         }
 
         let max_samples = count.min(output.len());
-        let channels = self.channels as usize;
-        let frames_needed = max_samples / channels;
+        let mut state = self.state.lock();
+        let output_channels = state.output_channels.max(1);
+        let frames_needed = max_samples / output_channels;
 
         if frames_needed == 0 {
             return 0;
         }
 
-        let mut scratch = vec![0.0; frames_needed * channels];
-        let mut state = self.state.lock();
+        let mut scratch = vec![0.0; frames_needed * output_channels];
 
         if (state.speed - 1.0).abs() < 0.0001 {
             self.render_direct(&mut state, &mut scratch);
@@ -276,25 +304,22 @@ impl AudioBuffer {
     }
 
     fn render_direct(&self, state: &mut PlaybackEngineState, output: &mut [f32]) {
-        let channels = self.channels as usize;
-        let frames_needed = output.len() / channels;
+        let output_channels = state.output_channels.max(1);
+        let frames_needed = output.len() / output_channels;
         let mut source_pos = state.display_position;
 
         for frame in 0..frames_needed {
             let Some(resolved_frame) = self.resolve_source_frame(state, source_pos) else {
-                for sample in output[frame * channels..].iter_mut() {
+                for sample in output[frame * output_channels..].iter_mut() {
                     *sample = 0.0;
                 }
                 state.display_position = self.frame_count() as f64;
                 return;
             };
 
-            for ch in 0..channels {
-                output[frame * channels + ch] = self.sample_at_frame(
-                    state,
-                    resolved_frame,
-                    self.source_channel_for_output(state, ch),
-                );
+            for ch in 0..output_channels {
+                output[frame * output_channels + ch] =
+                    self.source_sample_for_output(state, resolved_frame, ch);
             }
 
             source_pos = self.advance_source_position(state, source_pos, 1.0);
@@ -313,7 +338,7 @@ impl AudioBuffer {
     }
 
     fn render_stretched(&self, state: &mut PlaybackEngineState, output: &mut [f32]) {
-        let channels = self.channels as usize;
+        let channels = state.output_channels.max(1);
         let samples_needed = output.len();
         let available_samples = self.pending_samples(state).min(samples_needed);
 
@@ -357,7 +382,7 @@ impl AudioBuffer {
             return false;
         }
 
-        let channels = self.channels as usize;
+        let channels = state.output_channels.max(1);
         let overlap_samples = self.overlap_frames * channels;
 
         if state.first_grain || self.pending_frames(state) == 0 {
@@ -389,7 +414,7 @@ impl AudioBuffer {
     }
 
     fn extract_grain(&self, state: &PlaybackEngineState, start_frame: usize) -> Vec<f32> {
-        let channels = self.channels as usize;
+        let channels = state.output_channels.max(1);
         let mut grain = vec![0.0; self.grain_size_frames * channels];
 
         for frame in 0..self.grain_size_frames {
@@ -399,11 +424,8 @@ impl AudioBuffer {
             };
 
             for ch in 0..channels {
-                grain[frame * channels + ch] = self.sample_at_frame(
-                    state,
-                    resolved_frame,
-                    self.source_channel_for_output(state, ch),
-                );
+                grain[frame * channels + ch] =
+                    self.source_sample_for_output(state, resolved_frame, ch);
             }
         }
 
@@ -438,7 +460,7 @@ impl AudioBuffer {
         target: &[f32],
         candidate_start: usize,
     ) -> f32 {
-        let channels = self.channels as usize;
+        let channels = state.output_channels.max(1);
         let mut dot = 0.0f32;
         let mut target_energy = 0.0f32;
         let mut candidate_energy = 0.0f32;
@@ -452,11 +474,7 @@ impl AudioBuffer {
             for ch in 0..channels {
                 let idx = frame * channels + ch;
                 let a = target[idx];
-                let b = self.sample_at_frame(
-                    state,
-                    resolved_frame,
-                    self.source_channel_for_output(state, ch),
-                );
+                let b = self.source_sample_for_output(state, resolved_frame, ch);
                 dot += a * b;
                 target_energy += a * a;
                 candidate_energy += b * b;
@@ -531,6 +549,34 @@ impl AudioBuffer {
             AudioChannelMode::Left => 0,
             AudioChannelMode::Right => 1.min(channels - 1),
         }
+    }
+
+    fn source_sample_for_output(
+        &self,
+        state: &PlaybackEngineState,
+        frame: f64,
+        output_channel: usize,
+    ) -> f32 {
+        let source_channels = self.channels as usize;
+        if source_channels == 0 {
+            return 0.0;
+        }
+
+        if state.output_channels == 1
+            && source_channels > 1
+            && state.channel_mode == AudioChannelMode::Stereo
+        {
+            let total = (0..source_channels)
+                .map(|channel| self.sample_at_frame(state, frame, channel))
+                .sum::<f32>();
+            return total / source_channels as f32;
+        }
+
+        self.sample_at_frame(
+            state,
+            frame,
+            self.source_channel_for_output(state, output_channel),
+        )
     }
 
     fn advance_source_position(
@@ -708,5 +754,27 @@ mod tests {
         buffer.read_samples(output.len(), &mut output, 1.0);
 
         assert_eq!(output, vec![10.0, 10.0, 20.0, 20.0]);
+    }
+
+    #[test]
+    fn mono_source_is_duplicated_across_stereo_output() {
+        let buffer = AudioBuffer::new(vec![1.0, 2.0], 1, 48_000);
+        buffer.set_output_channel_count(2);
+
+        let mut output = vec![0.0f32; 4];
+        buffer.read_samples(output.len(), &mut output, 1.0);
+
+        assert_eq!(output, vec![1.0, 1.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn stereo_source_is_downmixed_for_mono_output() {
+        let buffer = AudioBuffer::new(vec![1.0, 10.0, 2.0, 20.0], 2, 48_000);
+        buffer.set_output_channel_count(1);
+
+        let mut output = vec![0.0f32; 2];
+        buffer.read_samples(output.len(), &mut output, 1.0);
+
+        assert_eq!(output, vec![5.5, 11.0]);
     }
 }

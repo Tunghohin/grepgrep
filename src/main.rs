@@ -86,7 +86,7 @@ fn main() -> Result<()> {
         options,
         Box::new(|cc| {
             // Set up fonts if needed
-            let _ = cc.egui_ctx.set_fonts(egui::FontDefinitions::default());
+            cc.egui_ctx.set_fonts(egui::FontDefinitions::default());
 
             let mut main_window = MainWindow::new();
 
@@ -168,13 +168,15 @@ fn render_logo_icon(svg: &str, size: u32) -> Result<egui::IconData> {
     Ok(fallback_icon_with_circle(
         size,
         color,
-        min_x,
-        min_y,
-        view_width,
-        view_height,
-        cx,
-        cy,
-        radius,
+        CircleIconSpec {
+            min_x,
+            min_y,
+            view_width,
+            view_height,
+            cx,
+            cy,
+            radius,
+        },
     ))
 }
 
@@ -224,12 +226,22 @@ fn extract_attr<'a>(tag: &'a str, attr_name: &str) -> Option<&'a str> {
 }
 
 fn fallback_icon(size: u32, color: [u8; 3]) -> egui::IconData {
-    fallback_icon_with_circle(size, color, 0.0, 0.0, 512.0, 512.0, 256.0, 256.0, 230.0)
+    fallback_icon_with_circle(
+        size,
+        color,
+        CircleIconSpec {
+            min_x: 0.0,
+            min_y: 0.0,
+            view_width: 512.0,
+            view_height: 512.0,
+            cx: 256.0,
+            cy: 256.0,
+            radius: 230.0,
+        },
+    )
 }
 
-fn fallback_icon_with_circle(
-    size: u32,
-    color: [u8; 3],
+struct CircleIconSpec {
     min_x: f32,
     min_y: f32,
     view_width: f32,
@@ -237,20 +249,22 @@ fn fallback_icon_with_circle(
     cx: f32,
     cy: f32,
     radius: f32,
-) -> egui::IconData {
+}
+
+fn fallback_icon_with_circle(size: u32, color: [u8; 3], spec: CircleIconSpec) -> egui::IconData {
     let width = size;
     let height = size;
     let mut rgba = vec![0u8; (width * height * 4) as usize];
-    let pixel_size = (view_width / width as f32).max(view_height / height as f32);
+    let pixel_size = (spec.view_width / width as f32).max(spec.view_height / height as f32);
     let edge_softness = pixel_size.max(1.0);
 
     for y in 0..height {
         for x in 0..width {
             let idx = ((y * width + x) * 4) as usize;
-            let svg_x = min_x + ((x as f32 + 0.5) / width as f32) * view_width;
-            let svg_y = min_y + ((y as f32 + 0.5) / height as f32) * view_height;
-            let distance = ((svg_x - cx).powi(2) + (svg_y - cy).powi(2)).sqrt();
-            let coverage = ((radius - distance) / edge_softness + 0.5).clamp(0.0, 1.0);
+            let svg_x = spec.min_x + ((x as f32 + 0.5) / width as f32) * spec.view_width;
+            let svg_y = spec.min_y + ((y as f32 + 0.5) / height as f32) * spec.view_height;
+            let distance = ((svg_x - spec.cx).powi(2) + (svg_y - spec.cy).powi(2)).sqrt();
+            let coverage = ((spec.radius - distance) / edge_softness + 0.5).clamp(0.0, 1.0);
 
             rgba[idx] = color[0];
             rgba[idx + 1] = color[1];

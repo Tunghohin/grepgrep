@@ -1,5 +1,6 @@
 //! Application state management
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ pub struct LoopRegion {
 
 impl LoopRegion {
     /// Create a new loop region
+    #[cfg(test)]
     pub fn new(start: f64, end: f64) -> Self {
         Self {
             start,
@@ -51,12 +53,12 @@ pub struct TimelineTag {
 pub struct AppState {
     /// Currently loaded file path
     pub file_path: Option<String>,
-    /// Currently loaded project directory, if any.
-    pub project_directory: Option<std::path::PathBuf>,
+    /// Currently loaded project file, if any.
+    pub project_path: Option<std::path::PathBuf>,
     /// Audio buffer (if loaded)
     pub audio_buffer: Option<Arc<AudioBuffer>>,
     /// Audio player (if initialized)
-    pub audio_player: Option<Arc<AudioPlayer>>,
+    pub audio_player: Option<Rc<AudioPlayer>>,
     /// Waveform generator
     pub waveform: Option<Arc<WaveformGenerator>>,
     /// Current playback position in seconds
@@ -97,7 +99,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             file_path: None,
-            project_directory: None,
+            project_path: None,
             audio_buffer: None,
             audio_player: None,
             waveform: None,
@@ -249,6 +251,7 @@ impl AppState {
     }
 
     /// Set loop region
+    #[cfg(test)]
     pub fn set_loop(&mut self, start: f64, end: f64) {
         let start = start.clamp(0.0, self.duration);
         let end = end.clamp(0.0, self.duration);
@@ -260,6 +263,7 @@ impl AppState {
     }
 
     /// Enable or disable the selected loop region without clearing it.
+    #[cfg(test)]
     pub fn set_loop_enabled(&mut self, enabled: bool) {
         if let Some(loop_region) = &mut self.loop_region {
             loop_region.enabled = enabled;
@@ -410,9 +414,7 @@ mod tests {
     fn speed_changes_are_clamped_before_reaching_player() {
         let mut state = AppState::new();
         let buffer = Arc::new(AudioBuffer::new(vec![0.0; 64], 2, 48_000));
-        let player = Arc::new(
-            crate::audio::AudioPlayer::new(buffer.clone()).expect("player should initialize"),
-        );
+        let player = Rc::new(crate::audio::AudioPlayer::new(buffer.clone()));
 
         state.audio_buffer = Some(buffer.clone());
         state.audio_player = Some(player.clone());
@@ -428,9 +430,7 @@ mod tests {
     fn channel_mode_changes_are_forwarded_to_player() {
         let mut state = AppState::new();
         let buffer = Arc::new(AudioBuffer::new(vec![0.0; 64], 2, 48_000));
-        let player = Arc::new(
-            crate::audio::AudioPlayer::new(buffer.clone()).expect("player should initialize"),
-        );
+        let player = Rc::new(crate::audio::AudioPlayer::new(buffer.clone()));
 
         state.audio_buffer = Some(buffer.clone());
         state.audio_player = Some(player.clone());
@@ -505,9 +505,7 @@ mod tests {
     fn applying_project_data_restores_project_state() {
         let mut state = AppState::new();
         let buffer = Arc::new(AudioBuffer::new(vec![0.0; 48_000 * 30 * 2], 2, 48_000));
-        let player = Arc::new(
-            crate::audio::AudioPlayer::new(buffer.clone()).expect("player should initialize"),
-        );
+        let player = Rc::new(crate::audio::AudioPlayer::new(buffer.clone()));
 
         state.duration = 30.0;
         state.audio_buffer = Some(buffer.clone());

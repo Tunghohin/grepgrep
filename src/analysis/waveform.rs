@@ -19,21 +19,30 @@ pub struct WaveformLevel {
     pub points: Vec<WaveformPoint>,
 }
 
+#[derive(Debug, Clone)]
+struct CachedWaveformLevel {
+    requested_width: usize,
+    level: WaveformLevel,
+}
+
 /// Multi-resolution waveform cache
 pub struct WaveformGenerator {
     /// Decoded audio samples
-    samples: Arc<RwLock<Vec<f32>>>,
+    samples: Arc<[f32]>,
     /// Number of channels
     channels: u16,
     /// Cached waveform levels (multi-resolution)
-    levels: RwLock<Vec<WaveformLevel>>,
+    levels: RwLock<Vec<CachedWaveformLevel>>,
 }
 
 impl WaveformGenerator {
     /// Create a new waveform generator
-    pub fn new(samples: Vec<f32>, channels: u16, _sample_rate: u32) -> Self {
+    pub fn new<S>(samples: S, channels: u16, _sample_rate: u32) -> Self
+    where
+        S: Into<Arc<[f32]>>,
+    {
         Self {
-            samples: Arc::new(RwLock::new(samples)),
+            samples: samples.into(),
             channels,
             levels: RwLock::new(Vec::new()),
         }
@@ -41,7 +50,7 @@ impl WaveformGenerator {
 
     /// Generate waveform data for a specific resolution
     pub fn generate(&self, pixels_width: usize) -> WaveformLevel {
-        let samples = self.samples.read();
+        let samples = &self.samples;
         let total_frames = samples.len() / self.channels as usize;
 
         if total_frames == 0 || pixels_width == 0 {
@@ -49,7 +58,7 @@ impl WaveformGenerator {
         }
 
         let samples_per_pixel = (total_frames as f64 / pixels_width as f64).ceil() as usize;
-        let num_points = (total_frames + samples_per_pixel - 1) / samples_per_pixel;
+        let num_points = total_frames.div_ceil(samples_per_pixel);
 
         let mut points = Vec::with_capacity(num_points);
 
@@ -93,38 +102,34 @@ impl WaveformGenerator {
         WaveformLevel { points }
     }
 
-    /// Generate and cache multiple resolution levels
-    pub fn generate_multi_resolution(&self, max_width: usize) {
-        let mut levels = self.levels.write();
-        levels.clear();
-
-        // Generate at different zoom levels
-        let widths = [200, 400, 800, 1600, 3200, 6400, 12800];
-
-        for &width in &widths {
-            if width <= max_width {
-                levels.push(self.generate(width));
-            }
-        }
-    }
-
     /// Get cached level closest to desired width
     pub fn get_level(&self, desired_width: usize) -> Option<WaveformLevel> {
-        let levels = self.levels.read();
-
-        if levels.is_empty() {
+        if desired_width == 0 {
             return None;
         }
 
-        // Find the level with enough points to cover the desired width
-        // Prefer the smallest level that has at least desired_width points
-        for level in levels.iter() {
-            if level.points.len() >= desired_width {
-                return Some(level.clone());
+        {
+            let levels = self.levels.read();
+
+            if let Some(level) = levels
+                .iter()
+                .find(|level| level.requested_width >= desired_width)
+            {
+                return Some(level.level.clone());
+            }
+
+            if let Some(level) = levels.last() {
+                return Some(level.level.clone());
             }
         }
 
-        // If no level has enough points, return the highest resolution one
-        levels.last().cloned()
+        let generated = self.generate(desired_width);
+        let mut levels = self.levels.write();
+        levels.push(CachedWaveformLevel {
+            requested_width: desired_width,
+            level: generated.clone(),
+        });
+        levels.sort_by_key(|level| level.requested_width);
+        Some(generated)
     }
 }

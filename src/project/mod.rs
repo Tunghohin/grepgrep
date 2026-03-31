@@ -1,12 +1,17 @@
-//! Project persistence for directory-based save and load.
+//! Project persistence for single-file save and load.
 
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use tempfile::TempDir;
+use zip::write::FileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::audio::AudioChannelMode;
 use crate::state::{AppState, LoopRegion, TimelineTag};
@@ -46,12 +51,13 @@ impl ProjectData {
 
 #[derive(Debug)]
 pub struct LoadedProject {
-    pub project_dir: PathBuf,
+    pub project_path: Option<PathBuf>,
     pub audio_path: PathBuf,
     pub data: ProjectData,
+    pub extracted_dir: Option<TempDir>,
 }
 
-pub fn default_project_directory_name(audio_path: &Path) -> String {
+pub fn default_project_file_name(audio_path: &Path) -> String {
     let stem = audio_path
         .file_stem()
         .and_then(OsStr::to_str)
@@ -61,7 +67,7 @@ pub fn default_project_directory_name(audio_path: &Path) -> String {
     format!("{stem}.ggproj")
 }
 
-pub fn save_to_directory(state: &AppState, project_dir: &Path) -> Result<PathBuf> {
+pub fn save_to_file(state: &AppState, project_file: &Path) -> Result<PathBuf> {
     let source_audio_path = state
         .file_path
         .as_deref()
@@ -75,41 +81,97 @@ pub fn save_to_directory(state: &AppState, project_dir: &Path) -> Result<PathBuf
         );
     }
 
-    if project_dir.exists() && !project_dir.is_dir() {
+    if project_file.exists() && project_file.is_dir() {
         bail!(
-            "Project destination must be a directory: {}",
-            project_dir.display()
+            "Project destination must be a file: {}",
+            project_file.display()
         );
     }
 
-    fs::create_dir_all(project_dir).with_context(|| {
-        format!(
-            "Failed to create project directory: {}",
-            project_dir.display()
-        )
-    })?;
+    if let Some(parent) = project_file.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create project parent directory: {}",
+                parent.display()
+            )
+        })?;
+    }
 
     let audio_file_name = source_audio_path
         .file_name()
         .and_then(OsStr::to_str)
         .ok_or_else(|| anyhow::anyhow!("Audio file name is not valid UTF-8"))?
         .to_string();
-    let target_audio_path = project_dir.join(&audio_file_name);
-
-    copy_file_atomically(&source_audio_path, &target_audio_path)?;
 
     let project_data = ProjectData::from_state(state, audio_file_name);
-    let project_json_path = project_dir.join(PROJECT_FILE_NAME);
     let json = serde_json::to_vec_pretty(&project_data).context("Failed to serialize project")?;
-    write_file_atomically(&project_json_path, &json)?;
+    let temp_path = temp_path_for(project_file);
+    write_project_archive(&temp_path, &source_audio_path, &project_data, &json)?;
 
-    Ok(match project_dir.canonicalize() {
+    replace_file_atomically(&temp_path, project_file)?;
+
+    Ok(match project_file.canonicalize() {
         Ok(path) => path,
-        Err(_) => project_dir.to_path_buf(),
+        Err(_) => project_file.to_path_buf(),
     })
 }
 
-pub fn load_from_directory(project_dir: &Path) -> Result<LoadedProject> {
+pub fn load_from_path(project_path: &Path) -> Result<LoadedProject> {
+    if project_path.is_dir() {
+        return load_from_directory(project_path);
+    }
+
+    if !project_path.is_file() {
+        bail!("Project path must be a file: {}", project_path.display());
+    }
+
+    load_from_archive(project_path)
+}
+
+fn load_from_archive(project_path: &Path) -> Result<LoadedProject> {
+    let archive_file = File::open(project_path)
+        .with_context(|| format!("Failed to open project archive: {}", project_path.display()))?;
+    let mut archive =
+        ZipArchive::new(archive_file).context("Failed to read project archive contents")?;
+    let extracted_dir = tempfile::tempdir().context("Failed to create temp project directory")?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .with_context(|| format!("Failed to read archive entry #{index}"))?;
+
+        if entry.is_dir() {
+            continue;
+        }
+
+        let enclosed_name = entry
+            .enclosed_name()
+            .ok_or_else(|| anyhow::anyhow!("Project archive contains an unsafe path"))?
+            .to_path_buf();
+        if enclosed_name.components().count() != 1 {
+            bail!("Project archive entries must be files at the archive root");
+        }
+
+        let output_path = extracted_dir.path().join(&enclosed_name);
+        let mut output_file = File::create(&output_path)
+            .with_context(|| format!("Failed to create {}", output_path.display()))?;
+        std::io::copy(&mut entry, &mut output_file)
+            .with_context(|| format!("Failed to extract {}", output_path.display()))?;
+    }
+
+    let mut loaded = load_from_directory_contents(extracted_dir.path())?;
+    loaded.project_path = Some(canonicalized_or_original(project_path));
+    loaded.extracted_dir = Some(extracted_dir);
+    Ok(loaded)
+}
+
+fn load_from_directory(project_dir: &Path) -> Result<LoadedProject> {
+    let mut loaded = load_from_directory_contents(project_dir)?;
+    loaded.project_path = None;
+    Ok(loaded)
+}
+
+fn load_from_directory_contents(project_dir: &Path) -> Result<LoadedProject> {
     if !project_dir.is_dir() {
         bail!(
             "Project path must be a directory: {}",
@@ -131,64 +193,65 @@ pub fn load_from_directory(project_dir: &Path) -> Result<LoadedProject> {
         );
     }
 
-    let audio_path = project_dir.join(&data.audio_file_name);
+    let audio_path = project_audio_path(project_dir, &data.audio_file_name)?;
     if !audio_path.is_file() {
         bail!("Project audio file is missing: {}", audio_path.display());
     }
 
     Ok(LoadedProject {
-        project_dir: match project_dir.canonicalize() {
-            Ok(path) => path,
-            Err(_) => project_dir.to_path_buf(),
-        },
+        project_path: None,
         audio_path,
         data,
+        extracted_dir: None,
     })
 }
 
-fn copy_file_atomically(source: &Path, destination: &Path) -> Result<()> {
-    if paths_refer_to_same_file(source, destination)? {
-        return Ok(());
-    }
+fn write_project_archive(
+    archive_path: &Path,
+    source_audio_path: &Path,
+    project_data: &ProjectData,
+    project_json: &[u8],
+) -> Result<()> {
+    let archive_file = File::create(archive_path)
+        .with_context(|| format!("Failed to create {}", archive_path.display()))?;
+    let mut writer = ZipWriter::new(archive_file);
+    let options = FileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o644);
 
-    let temp_path = temp_path_for(destination);
-    fs::copy(source, &temp_path).with_context(|| {
+    writer
+        .start_file(PROJECT_FILE_NAME, options)
+        .context("Failed to write project metadata into archive")?;
+    writer
+        .write_all(project_json)
+        .context("Failed to serialize project metadata into archive")?;
+
+    writer
+        .start_file(&project_data.audio_file_name, options)
+        .context("Failed to add project audio into archive")?;
+    let mut audio_file = File::open(source_audio_path)
+        .with_context(|| format!("Failed to open {}", source_audio_path.display()))?;
+    std::io::copy(&mut audio_file, &mut writer).with_context(|| {
         format!(
-            "Failed to copy audio from {} to {}",
-            source.display(),
-            temp_path.display()
+            "Failed to write {} into archive",
+            source_audio_path.display()
         )
     })?;
 
-    if destination.exists() {
-        fs::remove_file(destination).with_context(|| {
-            format!(
-                "Failed to replace existing audio file: {}",
-                destination.display()
-            )
-        })?;
-    }
-
-    fs::rename(&temp_path, destination).with_context(|| {
-        format!(
-            "Failed to finalize copied audio file: {}",
-            destination.display()
-        )
-    })?;
-
+    writer
+        .finish()
+        .context("Failed to finalize project archive")?;
     Ok(())
 }
 
-fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    let temp_path = temp_path_for(path);
-    fs::write(&temp_path, bytes)
-        .with_context(|| format!("Failed to write {}", temp_path.display()))?;
-
-    if path.exists() {
-        fs::remove_file(path).with_context(|| format!("Failed to replace {}", path.display()))?;
+fn replace_file_atomically(temp_path: &Path, destination: &Path) -> Result<()> {
+    if destination.exists() {
+        fs::remove_file(destination)
+            .with_context(|| format!("Failed to replace {}", destination.display()))?;
     }
 
-    fs::rename(&temp_path, path).with_context(|| format!("Failed to write {}", path.display()))?;
+    fs::rename(temp_path, destination)
+        .with_context(|| format!("Failed to write {}", destination.display()))?;
     Ok(())
 }
 
@@ -205,32 +268,36 @@ fn temp_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.{unique}.tmp"))
 }
 
-fn paths_refer_to_same_file(left: &Path, right: &Path) -> Result<bool> {
-    if left == right {
-        return Ok(true);
+fn project_audio_path(project_dir: &Path, audio_file_name: &str) -> Result<PathBuf> {
+    let mut components = Path::new(audio_file_name).components();
+    let is_plain_file_name =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+
+    if !is_plain_file_name {
+        bail!("Project audio file name must be a plain file name inside the project directory");
     }
 
-    if !left.exists() || !right.exists() {
-        return Ok(false);
-    }
+    Ok(project_dir.join(audio_file_name))
+}
 
-    let left = left.canonicalize()?;
-    let right = right.canonicalize()?;
-    Ok(left == right)
+fn canonicalized_or_original(path: &Path) -> PathBuf {
+    match path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     use tempfile::tempdir;
 
     use crate::state::AppState;
 
     #[test]
-    fn default_project_directory_name_uses_audio_stem() {
-        let name = default_project_directory_name(Path::new("/tmp/demo-song.mp3"));
+    fn default_project_file_name_uses_audio_stem() {
+        let name = default_project_file_name(Path::new("/tmp/demo-song.mp3"));
         assert_eq!(name, "demo-song.ggproj");
     }
 
@@ -258,13 +325,19 @@ mod tests {
             enabled: true,
         });
 
-        let project_dir = temp.path().join("example.ggproj");
-        save_to_directory(&state, &project_dir).expect("project should save");
+        let project_file = temp.path().join("example.ggproj");
+        save_to_file(&state, &project_file).expect("project should save");
 
-        let loaded = load_from_directory(&project_dir).expect("project should load");
+        let loaded = load_from_path(&project_file).expect("project should load");
 
-        assert_eq!(loaded.project_dir, project_dir.canonicalize().unwrap());
-        assert_eq!(loaded.audio_path, project_dir.join("example.wav"));
+        assert_eq!(
+            loaded.project_path,
+            Some(project_file.canonicalize().unwrap())
+        );
+        assert_eq!(
+            loaded.audio_path.file_name().and_then(OsStr::to_str),
+            Some("example.wav")
+        );
         assert_eq!(loaded.data.timeline_tags.len(), 1);
         assert_eq!(loaded.data.timeline_tags[0].name, "Verse");
         assert_eq!(loaded.data.loop_region.unwrap().start, 10.0);
@@ -272,5 +345,41 @@ mod tests {
         assert!((loaded.data.zoom - 2.5).abs() < 0.001);
         assert!((loaded.data.scroll_offset - 8.0).abs() < 0.001);
         assert_eq!(loaded.data.last_position, Some(12.5));
+        assert!(loaded.extracted_dir.is_some());
+    }
+
+    #[test]
+    fn load_rejects_audio_paths_outside_the_project_archive() {
+        let temp = tempdir().expect("tempdir should be created");
+        let source_audio_path = temp.path().join("example.wav");
+        fs::write(&source_audio_path, b"audio").expect("audio fixture should be written");
+        let project_file = temp.path().join("bad.ggproj");
+
+        let project_data = ProjectData {
+            version: PROJECT_VERSION,
+            audio_file_name: "../outside.wav".to_string(),
+            timeline_tags: Vec::new(),
+            loop_region: None,
+            speed: 1.0,
+            channel_mode: AudioChannelMode::Stereo,
+            zoom: 1.0,
+            scroll_offset: 0.0,
+            last_position: None,
+        };
+        let project_json =
+            serde_json::to_vec_pretty(&project_data).expect("project json should serialize");
+        write_project_archive(
+            &project_file,
+            &source_audio_path,
+            &project_data,
+            &project_json,
+        )
+        .expect("archive should be written");
+
+        let error = load_from_path(&project_file).expect_err("invalid path should fail");
+        assert!(
+            error.to_string().contains("unsafe path"),
+            "unexpected error: {error}"
+        );
     }
 }

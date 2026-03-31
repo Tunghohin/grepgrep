@@ -300,7 +300,7 @@ impl IcoImage {
             .checked_mul(usize::try_from(size)?)
             .and_then(|px| px.checked_mul(4))
             .ok_or("icon pixel buffer overflowed")?;
-        let and_row_bytes = usize::try_from(((size + 31) / 32) * 4)?;
+        let and_row_bytes = usize::try_from(size.div_ceil(32) * 4)?;
         let and_mask_size = and_row_bytes
             .checked_mul(usize::try_from(size)?)
             .ok_or("icon alpha mask overflowed")?;

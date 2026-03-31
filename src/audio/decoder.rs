@@ -98,8 +98,7 @@ impl AudioDecoder {
                         Ok(decoded) => {
                             // Create or resize sample buffer if needed
                             if sample_buf.is_none()
-                                || sample_buf.as_ref().unwrap().capacity()
-                                    < decoded.capacity() as usize
+                                || sample_buf.as_ref().unwrap().capacity() < decoded.capacity()
                             {
                                 sample_buf = Some(SampleBuffer::<f32>::new(
                                     decoded.capacity() as u64,
@@ -144,6 +143,7 @@ impl AudioDecoder {
     }
 
     /// Check if a file format is supported
+    #[cfg(test)]
     pub fn is_supported<P: AsRef<Path>>(path: P) -> bool {
         let ext = path
             .as_ref()

@@ -45,14 +45,14 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     /// Create a new audio player
-    pub fn new(buffer: Arc<AudioBuffer>) -> Result<Self> {
-        Ok(Self {
+    pub fn new(buffer: Arc<AudioBuffer>) -> Self {
+        Self {
             buffer,
             stream: None,
             state: AtomicU8::new(PlaybackState::Stopped as u8),
             volume: Arc::new(AtomicU32::new(1000)), // 1.0 volume
             speed: Arc::new(AtomicU32::new(1000)),  // 1.0 speed
-        })
+        }
     }
 
     /// Initialize the audio stream
@@ -105,6 +105,7 @@ impl AudioPlayer {
         let config: StreamConfig = supported_config.into();
 
         let buffer = self.buffer.clone();
+        buffer.set_output_channel_count(config.channels as usize);
         let volume = self.volume.clone();
         tracing::debug!(
             "Audio device: {:?}, format: {:?}, channels: {}, sample_rate: {}",
@@ -143,11 +144,11 @@ impl AudioPlayer {
                 let samples_read = buffer.read_samples(output.len(), output, vol);
 
                 // Zero out any remaining samples if we reached end of buffer
-                for i in samples_read..output.len() {
-                    output[i] = T::from_sample(0.0);
+                for sample in output.iter_mut().skip(samples_read) {
+                    *sample = T::from_sample(0.0);
                 }
             },
-            |err| eprintln!("Audio stream error: {}", err),
+            |err| tracing::error!("Audio stream error: {}", err),
             None,
         )?;
 
@@ -217,6 +218,7 @@ impl AudioPlayer {
     }
 
     /// Get playback speed
+    #[cfg(test)]
     pub fn speed(&self) -> f32 {
         self.speed.load(Ordering::SeqCst) as f32 / 1000.0
     }
@@ -227,6 +229,7 @@ impl AudioPlayer {
     }
 
     /// Get current source-channel playback mode.
+    #[cfg(test)]
     pub fn channel_mode(&self) -> AudioChannelMode {
         self.buffer.channel_mode()
     }
@@ -252,8 +255,7 @@ mod tests {
     #[test]
     fn stop_preserves_selected_speed() {
         let buffer = Arc::new(AudioBuffer::new(vec![0.0; 32], 2, 48_000));
-        let player =
-            AudioPlayer::new(buffer.clone()).expect("player should initialize without a stream");
+        let player = AudioPlayer::new(buffer.clone());
 
         player.set_speed(1.5);
         player.stop();
@@ -265,8 +267,7 @@ mod tests {
     #[test]
     fn play_from_end_restarts_from_beginning() {
         let buffer = Arc::new(AudioBuffer::new(vec![0.0; 16], 2, 48_000));
-        let player =
-            AudioPlayer::new(buffer.clone()).expect("player should initialize without a stream");
+        let player = AudioPlayer::new(buffer.clone());
 
         buffer.set_position(buffer.frame_count());
         assert!(buffer.is_at_end());
@@ -279,8 +280,7 @@ mod tests {
     #[test]
     fn channel_mode_updates_are_forwarded_to_buffer() {
         let buffer = Arc::new(AudioBuffer::new(vec![0.0; 16], 2, 48_000));
-        let player =
-            AudioPlayer::new(buffer.clone()).expect("player should initialize without a stream");
+        let player = AudioPlayer::new(buffer.clone());
 
         player.set_channel_mode(AudioChannelMode::Right);
 

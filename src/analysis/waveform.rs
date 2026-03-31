@@ -20,7 +20,9 @@ pub struct WaveformLevel {
 }
 
 #[derive(Debug, Clone)]
-struct CachedWaveformLevel {
+struct CachedWaveformWindow {
+    start_frame: usize,
+    end_frame: usize,
     requested_width: usize,
     level: WaveformLevel,
 }
@@ -31,8 +33,10 @@ pub struct WaveformGenerator {
     samples: Arc<[f32]>,
     /// Number of channels
     channels: u16,
-    /// Cached waveform levels (multi-resolution)
-    levels: RwLock<Vec<CachedWaveformLevel>>,
+    /// Total number of frames in the source audio.
+    total_frames: usize,
+    /// Cached waveform windows for recent viewports.
+    windows: RwLock<Vec<CachedWaveformWindow>>,
 }
 
 impl WaveformGenerator {
@@ -41,37 +45,52 @@ impl WaveformGenerator {
     where
         S: Into<Arc<[f32]>>,
     {
+        let samples = samples.into();
         Self {
-            samples: samples.into(),
+            total_frames: samples.len() / channels as usize,
+            samples,
             channels,
-            levels: RwLock::new(Vec::new()),
+            windows: RwLock::new(Vec::new()),
         }
     }
 
-    /// Generate waveform data for a specific resolution
-    pub fn generate(&self, pixels_width: usize) -> WaveformLevel {
+    /// Get total number of frames in the source audio.
+    pub fn frame_count(&self) -> usize {
+        self.total_frames
+    }
+
+    /// Generate waveform data for a specific frame window.
+    pub fn generate_window(
+        &self,
+        start_frame: usize,
+        end_frame: usize,
+        pixels_width: usize,
+    ) -> WaveformLevel {
         let samples = &self.samples;
-        let total_frames = samples.len() / self.channels as usize;
+        let total_frames = self.total_frames;
 
         if total_frames == 0 || pixels_width == 0 {
             return WaveformLevel { points: Vec::new() };
         }
 
-        let samples_per_pixel = (total_frames as f64 / pixels_width as f64).ceil() as usize;
-        let num_points = total_frames.div_ceil(samples_per_pixel);
+        let start_frame = start_frame.min(total_frames);
+        let end_frame = end_frame.clamp(start_frame.saturating_add(1), total_frames);
+        let window_frames = end_frame - start_frame;
+        let num_points = pixels_width.max(1);
 
         let mut points = Vec::with_capacity(num_points);
 
         let channels = self.channels as usize;
 
         for i in 0..num_points {
-            let start = i * samples_per_pixel;
-            let end = ((i + 1) * samples_per_pixel).min(total_frames);
+            let start = start_frame + i * window_frames / num_points;
+            let mut end = start_frame + (i + 1) * window_frames / num_points;
+            if end <= start {
+                end = (start + 1).min(end_frame);
+            }
 
             let mut min = f32::MAX;
             let mut max = f32::MIN;
-            let mut sum_sq = 0.0;
-            let mut count = 0;
 
             for frame in start..end {
                 // Mix all channels to mono for visualization
@@ -83,15 +102,7 @@ impl WaveformGenerator {
 
                 min = min.min(mono);
                 max = max.max(mono);
-                sum_sq += mono * mono;
-                count += 1;
             }
-
-            let _rms = if count > 0 {
-                (sum_sq / count as f32).sqrt()
-            } else {
-                0.0
-            };
 
             points.push(WaveformPoint {
                 min: if min == f32::MAX { 0.0 } else { min },
@@ -102,34 +113,79 @@ impl WaveformGenerator {
         WaveformLevel { points }
     }
 
-    /// Get cached level closest to desired width
-    pub fn get_level(&self, desired_width: usize) -> Option<WaveformLevel> {
-        if desired_width == 0 {
+    /// Get cached waveform data for the current visible frame window.
+    pub fn get_window(
+        &self,
+        start_frame: usize,
+        end_frame: usize,
+        desired_width: usize,
+    ) -> Option<WaveformLevel> {
+        if desired_width == 0 || self.total_frames == 0 {
             return None;
         }
 
+        let start_frame = start_frame.min(self.total_frames);
+        let end_frame = end_frame.clamp(start_frame.saturating_add(1), self.total_frames);
+
         {
-            let levels = self.levels.read();
+            let windows = self.windows.read();
 
-            if let Some(level) = levels
-                .iter()
-                .find(|level| level.requested_width >= desired_width)
-            {
-                return Some(level.level.clone());
-            }
-
-            if let Some(level) = levels.last() {
-                return Some(level.level.clone());
+            if let Some(window) = windows.iter().find(|window| {
+                window.start_frame == start_frame
+                    && window.end_frame == end_frame
+                    && window.requested_width == desired_width
+            }) {
+                return Some(window.level.clone());
             }
         }
 
-        let generated = self.generate(desired_width);
-        let mut levels = self.levels.write();
-        levels.push(CachedWaveformLevel {
+        let generated = self.generate_window(start_frame, end_frame, desired_width);
+        let mut windows = self.windows.write();
+        windows.push(CachedWaveformWindow {
+            start_frame,
+            end_frame,
             requested_width: desired_width,
             level: generated.clone(),
         });
-        levels.sort_by_key(|level| level.requested_width);
+
+        const MAX_CACHED_WINDOWS: usize = 8;
+        if windows.len() > MAX_CACHED_WINDOWS {
+            let excess = windows.len() - MAX_CACHED_WINDOWS;
+            windows.drain(..excess);
+        }
+
         Some(generated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_window_generation_preserves_local_peaks() {
+        let samples = vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let generator = WaveformGenerator::new(samples, 1, 48_000);
+
+        let level = generator
+            .get_window(10, 12, 8)
+            .expect("windowed waveform should be generated");
+
+        assert_eq!(level.points.len(), 8);
+        assert!(level.points.iter().any(|point| point.max == 1.0));
+        assert!(level.points.iter().any(|point| point.min == -1.0));
+    }
+
+    #[test]
+    fn window_generation_matches_requested_pixel_width() {
+        let generator = WaveformGenerator::new(vec![0.0; 128], 1, 48_000);
+
+        let level = generator
+            .get_window(0, 128, 37)
+            .expect("windowed waveform should be generated");
+
+        assert_eq!(level.points.len(), 37);
     }
 }

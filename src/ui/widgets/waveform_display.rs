@@ -234,40 +234,42 @@ impl<'a> WaveformDisplay<'a> {
         let visible_start = scroll_offset;
         let visible_end = (visible_start + visible_duration).min(duration);
 
-        let rect_width = rect.width() as usize;
-        if let Some(level) = self.waveform.get_level(rect_width) {
+        let rect_width = rect.width().ceil() as usize;
+        let total_frames = self.waveform.frame_count();
+        let start_ratio = (visible_start / duration).clamp(0.0, 1.0);
+        let end_ratio = (visible_end / duration).clamp(0.0, 1.0);
+        let start_frame = (start_ratio * total_frames as f64).floor() as usize;
+        let end_frame = ((end_ratio * total_frames as f64).ceil() as usize)
+            .max(start_frame.saturating_add(1))
+            .min(total_frames);
+
+        if let Some(level) = self.waveform.get_window(start_frame, end_frame, rect_width) {
             let points = &level.points;
             if points.is_empty() {
                 return;
             }
 
-            let total_points = points.len();
             let height = rect.height();
             let center_y = rect.center().y;
             let amplitude = height / 2.0 * 0.9;
 
-            let start_ratio = visible_start / duration;
-            let end_ratio = visible_end / duration;
+            for (point_idx, point) in points.iter().enumerate() {
+                let x = painter.round_to_pixel_center(rect.left() + point_idx as f32);
+                let top_y = painter.round_to_pixel(center_y - point.max * amplitude);
+                let bottom_y = painter.round_to_pixel(center_y - point.min * amplitude);
 
-            let start_idx = (start_ratio * total_points as f64) as usize;
-            let end_idx = (end_ratio * total_points as f64) as usize;
-            let num_points = (end_idx - start_idx).max(1);
-
+                painter.line_segment(
+                    [Pos2::new(x, top_y), Pos2::new(x, bottom_y)],
+                    self.theme.waveform_stroke(1.0),
+                );
+            }
+        } else {
             for pixel_x in 0..rect_width {
-                let point_idx = start_idx + (pixel_x * num_points / rect_width).min(num_points - 1);
-
-                if point_idx < points.len() {
-                    let point = points[point_idx];
-                    let x = rect.left() + pixel_x as f32;
-
-                    let top_y = center_y - point.max * amplitude;
-                    let bottom_y = center_y - point.min * amplitude;
-
-                    painter.line_segment(
-                        [Pos2::new(x, top_y), Pos2::new(x, bottom_y)],
-                        self.theme.waveform_stroke(1.0),
-                    );
-                }
+                let x = rect.left() + pixel_x as f32;
+                painter.line_segment(
+                    [Pos2::new(x, rect.center().y), Pos2::new(x, rect.center().y)],
+                    self.theme.waveform_stroke(1.0),
+                );
             }
         }
     }

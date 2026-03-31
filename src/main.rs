@@ -14,6 +14,7 @@ use clap::Parser;
 
 mod analysis;
 mod audio;
+mod project;
 mod state;
 mod ui;
 

@@ -1,15 +1,24 @@
 //! Main window layout
 
 use egui::{Button, CentralPanel, ComboBox, RichText, SidePanel, Slider, TopBottomPanel};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::analysis::WaveformGenerator;
 use crate::audio::{AudioBuffer, AudioChannelMode, AudioDecoder, AudioPlayer};
+use crate::project::{
+    default_project_directory_name, load_from_directory, save_to_directory, ProjectData,
+};
 use crate::state::AppState;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{
     LoopControl, PlaybackControls, SpeedControl, TimeDisplay, WaveformDisplay,
 };
+
+enum PendingLoad {
+    Audio(String),
+    Project(PathBuf),
+}
 
 /// Main application window
 pub struct MainWindow {
@@ -19,8 +28,8 @@ pub struct MainWindow {
     theme: Theme,
     /// File path input for testing
     file_path_input: String,
-    /// Pending file to load (to avoid borrow issues)
-    pending_file: Option<String>,
+    /// Pending audio file or project to load (to avoid borrow issues)
+    pending_load: Option<PendingLoad>,
 }
 
 impl MainWindow {
@@ -30,7 +39,7 @@ impl MainWindow {
             state: AppState::new(),
             theme: Theme::default(),
             file_path_input: String::new(),
-            pending_file: None,
+            pending_load: None,
         }
     }
 
@@ -41,11 +50,17 @@ impl MainWindow {
 
     /// Load a file from path (public interface for CLI)
     pub fn load_file_from_path(&mut self, path: &str) {
-        self.pending_file = Some(path.to_string());
+        self.file_path_input = path.to_string();
+        self.pending_load = Some(PendingLoad::Audio(path.to_string()));
     }
 
-    /// Load an audio file
-    fn load_file(&mut self, path: String) {
+    /// Load an audio file and optionally restore project data.
+    fn load_audio_file(
+        &mut self,
+        path: String,
+        project_data: Option<ProjectData>,
+        project_directory: Option<PathBuf>,
+    ) {
         if let Some(player) = &self.state.audio_player {
             player.stop();
         }
@@ -89,23 +104,18 @@ impl MainWindow {
                 waveform.generate_multi_resolution(12800);
 
                 // Update state
+                self.state.reset_project_state();
                 self.state.duration = decoded.duration.as_secs_f64();
                 self.state.file_path = Some(path.clone());
+                self.state.project_directory = project_directory;
                 self.state.audio_buffer = Some(buffer);
                 self.state.audio_player = Some(player);
                 self.state.waveform = Some(waveform);
                 self.state.error = None;
-                self.state.position = 0.0;
-                self.state.loop_region = None;
-                self.state.selecting_loop = false;
-                self.state.loop_selection_start = None;
-                self.state.zoom = 1.0;
-                self.state.scroll_offset = 0.0;
-                self.state.timeline_tags.clear();
-                self.state.next_timeline_tag_id = 1;
-                self.state.editing_timeline_tag_id = None;
-                self.state.timeline_tag_editor_text.clear();
-                self.state.timeline_tag_editor_needs_focus = false;
+
+                if let Some(project_data) = project_data {
+                    self.state.apply_project_data(&project_data);
+                }
 
                 tracing::info!("Loaded audio file: {} ({}s)", path, self.state.duration);
             }
@@ -114,6 +124,97 @@ impl MainWindow {
                 tracing::error!("Failed to load file: {}", e);
             }
         }
+    }
+
+    fn open_project(&mut self, project_dir: PathBuf) {
+        match load_from_directory(&project_dir) {
+            Ok(loaded_project) => {
+                let audio_path = loaded_project.audio_path.to_string_lossy().to_string();
+                self.file_path_input = audio_path.clone();
+                self.load_audio_file(
+                    audio_path,
+                    Some(loaded_project.data),
+                    Some(loaded_project.project_dir),
+                );
+            }
+            Err(error) => {
+                self.state.error = Some(format!("Failed to open project: {}", error));
+                tracing::error!(
+                    "Failed to open project {}: {}",
+                    project_dir.display(),
+                    error
+                );
+            }
+        }
+    }
+
+    fn save_project(&mut self, project_dir: PathBuf) {
+        match save_to_directory(&self.state, &project_dir) {
+            Ok(saved_dir) => {
+                if let Some(audio_path) = self.project_audio_path(&saved_dir) {
+                    self.state.file_path = Some(audio_path.to_string_lossy().to_string());
+                    self.file_path_input = audio_path.to_string_lossy().to_string();
+                }
+                self.state.project_directory = Some(saved_dir.clone());
+                self.state.error = None;
+                tracing::info!("Saved project to {}", saved_dir.display());
+            }
+            Err(error) => {
+                self.state.error = Some(format!("Failed to save project: {}", error));
+                tracing::error!(
+                    "Failed to save project {}: {}",
+                    project_dir.display(),
+                    error
+                );
+            }
+        }
+    }
+
+    fn prompt_open_project(&mut self) {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(project_dir) = &self.state.project_directory {
+            dialog = dialog.set_directory(project_dir);
+        } else if let Some(file_path) = self.state.file_path.as_deref().map(Path::new) {
+            if let Some(parent) = file_path.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+        }
+
+        if let Some(path) = dialog.pick_folder() {
+            self.pending_load = Some(PendingLoad::Project(path));
+        }
+    }
+
+    fn save_project_via_dialog(&mut self) {
+        if let Some(project_dir) = self.state.project_directory.clone() {
+            self.save_project(project_dir);
+            return;
+        }
+
+        let Some(audio_path) = self.state.file_path.as_deref().map(Path::new) else {
+            self.state.error = Some("Load an audio file before saving a project".to_string());
+            return;
+        };
+
+        let default_name = default_project_directory_name(audio_path);
+        let mut dialog = rfd::FileDialog::new().set_file_name(&default_name);
+        if let Some(parent) = audio_path.parent() {
+            dialog = dialog.set_directory(parent);
+        }
+
+        if let Some(project_dir) = dialog.save_file() {
+            self.save_project(project_dir);
+        }
+    }
+
+    fn project_audio_path(&self, project_dir: &Path) -> Option<PathBuf> {
+        let audio_file_name = self
+            .state
+            .file_path
+            .as_deref()
+            .map(Path::new)?
+            .file_name()?;
+        Some(project_dir.join(audio_file_name))
     }
 }
 
@@ -125,9 +226,12 @@ impl eframe::App for MainWindow {
         // Request continuous repaint for real-time updates
         ctx.request_repaint();
 
-        // Handle pending file load
-        if let Some(path) = self.pending_file.take() {
-            self.load_file(path);
+        // Handle pending file or project load
+        if let Some(pending_load) = self.pending_load.take() {
+            match pending_load {
+                PendingLoad::Audio(path) => self.load_audio_file(path, None, None),
+                PendingLoad::Project(project_dir) => self.open_project(project_dir),
+            }
         }
 
         // Update playback position from player
@@ -156,7 +260,7 @@ impl eframe::App for MainWindow {
                 // Open button
                 if ui.add(Button::new("Open")).clicked() {
                     if !self.file_path_input.is_empty() {
-                        self.pending_file = Some(self.file_path_input.clone());
+                        self.pending_load = Some(PendingLoad::Audio(self.file_path_input.clone()));
                     }
                 }
 
@@ -167,8 +271,20 @@ impl eframe::App for MainWindow {
                         .pick_file()
                     {
                         self.file_path_input = path.to_string_lossy().to_string();
-                        self.pending_file = Some(self.file_path_input.clone());
+                        self.pending_load = Some(PendingLoad::Audio(self.file_path_input.clone()));
                     }
+                }
+
+                if ui.add(Button::new("Open Project...")).clicked() {
+                    self.prompt_open_project();
+                }
+
+                let can_save_project = self.state.audio_buffer.is_some();
+                if ui
+                    .add_enabled(can_save_project, Button::new("Save Project..."))
+                    .clicked()
+                {
+                    self.save_project_via_dialog();
                 }
 
                 // Show error if any
@@ -290,7 +406,7 @@ impl eframe::App for MainWindow {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(
-                            "Space: Play/Pause | Click timeline/waveform: Play from position | Drag waveform: Select loop | Ctrl+Click: Add tag | Click tag: Play | Double-click tag: Rename"
+                            "Space: Play/Pause | Ctrl+S: Save Project | Ctrl+Shift+O: Open Project | Click timeline/waveform: Play from position | Drag waveform: Select loop | Ctrl+Click: Add tag | Click tag: Play | Double-click tag: Rename"
                         )
                             .color(text_muted)
                             .size(11.0)
@@ -322,7 +438,7 @@ impl eframe::App for MainWindow {
                             .add_filter("Audio Files", &["mp3", "flac", "wav", "ogg", "aac", "m4a"])
                             .pick_file() {
                             self.file_path_input = path.to_string_lossy().to_string();
-                            self.pending_file = Some(self.file_path_input.clone());
+                            self.pending_load = Some(PendingLoad::Audio(self.file_path_input.clone()));
                         }
                     }
 
@@ -357,6 +473,7 @@ impl eframe::App for MainWindow {
         // Handle keyboard shortcuts
         let is_playing = self.state.is_playing();
         let has_player = self.state.audio_player.is_some();
+        let has_audio = self.state.audio_buffer.is_some();
         let has_loop = self.state.loop_region.is_some();
 
         ctx.input(|i| {
@@ -373,15 +490,25 @@ impl eframe::App for MainWindow {
                 }
             }
 
+            // Ctrl+Shift+O: Open project
+            if i.key_pressed(egui::Key::O) && i.modifiers.ctrl && i.modifiers.shift {
+                self.prompt_open_project();
+            }
+
             // Ctrl+O: Open file
-            if i.key_pressed(egui::Key::O) && i.modifiers.ctrl {
+            if i.key_pressed(egui::Key::O) && i.modifiers.ctrl && !i.modifiers.shift {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Audio Files", &["mp3", "flac", "wav", "ogg", "aac", "m4a"])
                     .pick_file()
                 {
                     self.file_path_input = path.to_string_lossy().to_string();
-                    self.pending_file = Some(self.file_path_input.clone());
+                    self.pending_load = Some(PendingLoad::Audio(self.file_path_input.clone()));
                 }
+            }
+
+            // Ctrl+S: Save project
+            if i.key_pressed(egui::Key::S) && i.modifiers.ctrl && has_audio {
+                self.save_project_via_dialog();
             }
 
             // L: Toggle loop

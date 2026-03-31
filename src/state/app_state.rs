@@ -3,11 +3,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::analysis::WaveformGenerator;
 use crate::audio::{AudioBuffer, AudioChannelMode, AudioPlayer};
+use crate::project::ProjectData;
 
 /// Loop region state
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct LoopRegion {
     /// Start position in seconds
     pub start: f64,
@@ -34,7 +37,7 @@ impl LoopRegion {
 }
 
 /// Named marker on the audio timeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineTag {
     /// Stable identifier used for editing and hit-testing.
     pub id: u64,
@@ -48,6 +51,8 @@ pub struct TimelineTag {
 pub struct AppState {
     /// Currently loaded file path
     pub file_path: Option<String>,
+    /// Currently loaded project directory, if any.
+    pub project_directory: Option<std::path::PathBuf>,
     /// Audio buffer (if loaded)
     pub audio_buffer: Option<Arc<AudioBuffer>>,
     /// Audio player (if initialized)
@@ -92,6 +97,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             file_path: None,
+            project_directory: None,
             audio_buffer: None,
             audio_player: None,
             waveform: None,
@@ -119,6 +125,77 @@ impl AppState {
     /// Create a new application state
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reset view and annotation state for a newly loaded audio file.
+    pub fn reset_project_state(&mut self) {
+        self.position = 0.0;
+        self.loop_region = None;
+        self.selecting_loop = false;
+        self.loop_selection_start = None;
+        self.zoom = 1.0;
+        self.scroll_offset = 0.0;
+        self.timeline_tags.clear();
+        self.next_timeline_tag_id = 1;
+        self.editing_timeline_tag_id = None;
+        self.timeline_tag_editor_text.clear();
+        self.timeline_tag_editor_needs_focus = false;
+    }
+
+    /// Apply persisted project data after an audio file has been loaded.
+    pub fn apply_project_data(&mut self, project: &ProjectData) {
+        self.finish_timeline_tag_edit(false);
+
+        self.timeline_tags = project
+            .timeline_tags
+            .iter()
+            .cloned()
+            .map(|mut tag| {
+                tag.time = sanitize_time(tag.time, self.duration);
+                tag
+            })
+            .collect();
+        self.timeline_tags
+            .sort_by(|left, right| left.time.total_cmp(&right.time));
+        self.next_timeline_tag_id = self
+            .timeline_tags
+            .iter()
+            .map(|tag| tag.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        self.set_speed(if project.speed.is_finite() {
+            project.speed
+        } else {
+            1.0
+        });
+        self.set_channel_mode(project.channel_mode);
+
+        self.zoom = if project.zoom.is_finite() {
+            project.zoom.clamp(1.0, 50.0)
+        } else {
+            1.0
+        };
+        self.scroll_offset =
+            sanitize_scroll_offset(project.scroll_offset, self.duration, self.zoom);
+
+        self.loop_region = project.loop_region.and_then(|loop_region| {
+            let start = sanitize_time(loop_region.start, self.duration);
+            let end = sanitize_time(loop_region.end, self.duration);
+            (start < end).then_some(LoopRegion {
+                start,
+                end,
+                enabled: loop_region.enabled,
+            })
+        });
+        self.sync_loop_state();
+
+        if let Some(position) = project.last_position {
+            self.seek(position);
+        } else {
+            self.seek(0.0);
+        }
     }
 
     /// Check if currently playing
@@ -302,6 +379,28 @@ pub fn format_time(seconds: f64) -> String {
     format!("{:02}:{:02}.{:03}", minutes, secs, ms)
 }
 
+fn sanitize_time(value: f64, max: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, max.max(0.0))
+    } else {
+        0.0
+    }
+}
+
+fn sanitize_scroll_offset(scroll_offset: f64, duration: f64, zoom: f32) -> f64 {
+    if !scroll_offset.is_finite() {
+        return 0.0;
+    }
+
+    if duration <= 0.0 || zoom <= 1.0 {
+        return 0.0;
+    }
+
+    let visible_duration = duration / zoom as f64;
+    let max_scroll = (duration - visible_duration).max(0.0);
+    scroll_offset.clamp(0.0, max_scroll)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +499,63 @@ mod tests {
             "Verse In"
         );
         assert_eq!(state.editing_timeline_tag_id, None);
+    }
+
+    #[test]
+    fn applying_project_data_restores_project_state() {
+        let mut state = AppState::new();
+        let buffer = Arc::new(AudioBuffer::new(vec![0.0; 48_000 * 30 * 2], 2, 48_000));
+        let player = Arc::new(
+            crate::audio::AudioPlayer::new(buffer.clone()).expect("player should initialize"),
+        );
+
+        state.duration = 30.0;
+        state.audio_buffer = Some(buffer.clone());
+        state.audio_player = Some(player.clone());
+
+        state.apply_project_data(&ProjectData {
+            version: 1,
+            audio_file_name: "demo.wav".to_string(),
+            timeline_tags: vec![
+                TimelineTag {
+                    id: 5,
+                    time: 25.0,
+                    name: "Outro".to_string(),
+                },
+                TimelineTag {
+                    id: 3,
+                    time: 5.0,
+                    name: "Intro".to_string(),
+                },
+            ],
+            loop_region: Some(LoopRegion {
+                start: 4.0,
+                end: 8.0,
+                enabled: true,
+            }),
+            speed: 1.25,
+            channel_mode: AudioChannelMode::Right,
+            zoom: 4.0,
+            scroll_offset: 3.0,
+            last_position: Some(6.5),
+        });
+
+        assert_eq!(state.timeline_tags[0].name, "Intro");
+        assert_eq!(state.timeline_tags[1].name, "Outro");
+        assert_eq!(state.next_timeline_tag_id, 6);
+        assert_eq!(
+            state.loop_region,
+            Some(LoopRegion {
+                start: 4.0,
+                end: 8.0,
+                enabled: true
+            })
+        );
+        assert!((state.speed - 1.25).abs() < 0.001);
+        assert_eq!(state.channel_mode, AudioChannelMode::Right);
+        assert!((state.zoom - 4.0).abs() < 0.001);
+        assert!((state.scroll_offset - 3.0).abs() < 0.001);
+        assert!((state.position - 6.5).abs() < 0.001);
+        assert_eq!(buffer.loop_bounds(), Some((192_000, 384_000)));
     }
 }

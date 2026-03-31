@@ -27,6 +27,8 @@ crossbeam = "0.8"
 parking_lot = "0.12"
 anyhow = "1.0"
 thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 # File Dialog
 rfd = "0.15"
@@ -68,3 +70,6 @@ lto = true
 inherits = "release"
 opt-level = 3
 lto = true
+
+[dev-dependencies]
+tempfile = "3.14"

@@ -2,10 +2,11 @@
 
 use cpal::Sample;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Source-channel playback mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AudioChannelMode {
     /// Preserve the original channel layout.
     #[default]

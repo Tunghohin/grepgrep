@@ -1,6 +1,7 @@
 #!/bin/bash
 # Build script for grepgrep
-# Supports building for Linux and Windows from any platform
+# Supports native builds for Linux, macOS, and Windows,
+# plus Windows cross-compilation when the toolchain is available.
 
 set -e
 
@@ -56,6 +57,25 @@ build_linux() {
     cp target/x86_64-unknown-linux-gnu/release/grepgrep dist/linux/
 
     print_success "Linux build complete: dist/linux/grepgrep"
+}
+
+# Build for macOS
+build_macos() {
+    print_info "Building for macOS..."
+
+    local current_platform=$(detect_platform)
+
+    if [ "$current_platform" != "macos" ]; then
+        print_error "macOS builds must be run on a macOS host. Cross-compilation is not configured in this script."
+        exit 1
+    fi
+
+    cargo build --release
+
+    mkdir -p dist/macos
+    cp target/release/grepgrep dist/macos/
+
+    print_success "macOS build complete: dist/macos/grepgrep"
 }
 
 # Build for Windows (requires mingw-w64 or cross-compilation setup)
@@ -138,6 +158,11 @@ build_all() {
     print_info "Building for all platforms..."
     build_linux
     build_windows
+    if [ "$(detect_platform)" = "macos" ]; then
+        build_macos
+    else
+        print_warning "Skipping macOS build because it requires a macOS host"
+    fi
     print_success "All builds complete!"
 }
 
@@ -157,6 +182,7 @@ show_help() {
     echo ""
     echo "Commands:"
     echo "  linux     Build for Linux (x86_64)"
+    echo "  macos     Build for macOS (native macOS host only)"
     echo "  windows   Build for Windows (x86_64)"
     echo "  current   Build for current platform"
     echo "  all       Build for all platforms"
@@ -165,6 +191,7 @@ show_help() {
     echo ""
     echo "Examples:"
     echo "  $0 linux          # Build for Linux"
+    echo "  $0 macos          # Build for macOS"
     echo "  $0 windows        # Build for Windows"
     echo "  $0 --platform linux  # Alternative syntax"
     echo ""
@@ -183,6 +210,9 @@ main() {
     case $command in
         linux)
             build_linux
+            ;;
+        macos)
+            build_macos
             ;;
         windows)
             build_windows

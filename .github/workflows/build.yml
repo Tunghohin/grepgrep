@@ -23,6 +23,10 @@ jobs:
             platform: linux
             binary_path: target/release/grepgrep
             package_name: grepgrep_linux.zip
+          - os: macos-latest
+            platform: macos
+            binary_path: target/release/grepgrep
+            package_name: grepgrep_macos.zip
           - os: windows-latest
             platform: windows
             binary_path: target/release/grepgrep.exe
@@ -57,13 +61,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Package Linux artifact
-        if: matrix.platform == 'linux'
+      - name: Package Unix artifact
+        if: matrix.platform != 'windows'
         run: |
-          mkdir -p release/linux
-          cp "${{ matrix.binary_path }}" release/linux/grepgrep
-          cp README.md release/linux/README.md
-          cd release/linux
+          mkdir -p "release/${{ matrix.platform }}"
+          cp "${{ matrix.binary_path }}" "release/${{ matrix.platform }}/grepgrep"
+          cp README.md "release/${{ matrix.platform }}/README.md"
+          cd "release/${{ matrix.platform }}"
           zip -r "../../${{ matrix.package_name }}" .
 
       - name: Package Windows artifact
@@ -99,7 +103,7 @@ jobs:
         with:
           allowUpdates: true
           artifactErrorsFailBuild: true
-          artifacts: "release-assets/linux-release/grepgrep_linux.zip,release-assets/windows-release/grepgrep_windows.zip"
+          artifacts: "release-assets/linux-release/grepgrep_linux.zip,release-assets/macos-release/grepgrep_macos.zip,release-assets/windows-release/grepgrep_windows.zip"
           commit: ${{ github.sha }}
           generateReleaseNotes: true
           makeLatest: false
@@ -126,7 +130,7 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           artifactErrorsFailBuild: true
-          artifacts: "release-assets/linux-release/grepgrep_linux.zip,release-assets/windows-release/grepgrep_windows.zip"
+          artifacts: "release-assets/linux-release/grepgrep_linux.zip,release-assets/macos-release/grepgrep_macos.zip,release-assets/windows-release/grepgrep_windows.zip"
           generateReleaseNotes: true
           makeLatest: true
           name: ${{ github.ref_name }}

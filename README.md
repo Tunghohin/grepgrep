@@ -31,9 +31,12 @@ Build targets:
 
 ```bash
 ./build.sh linux
+./build.sh macos
 ./build.sh windows
 ./build.sh all
 ```
+
+`./build.sh macos` must be run on a macOS host. GitHub Actions now builds and packages a macOS release artifact automatically.
 
 Run from source:
 

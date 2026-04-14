@@ -10,10 +10,11 @@ use tempfile::TempDir;
 use crate::analysis::WaveformGenerator;
 use crate::audio::{AudioBuffer, AudioChannelMode, AudioDecoder, AudioPlayer};
 use crate::project::{default_project_file_name, load_from_path, save_to_file, ProjectData};
-use crate::state::AppState;
+use crate::state::{AppState, VisualizationMode};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{
-    LoopControl, PlaybackControls, SpeedControl, TimeDisplay, WaveformDisplay,
+    LoopControl, PlaybackControls, SpectrogramTextureCache, SpeedControl, TimeDisplay,
+    WaveformDisplay,
 };
 
 enum PendingLoad {
@@ -33,6 +34,8 @@ pub struct MainWindow {
     pending_load: Option<PendingLoad>,
     /// Extracted temp directory for the currently open archived project.
     open_project_tempdir: Option<TempDir>,
+    /// Cached texture for the spectrogram viewport.
+    spectrogram_texture: Option<SpectrogramTextureCache>,
 }
 
 impl MainWindow {
@@ -44,6 +47,7 @@ impl MainWindow {
             file_path_input: String::new(),
             pending_load: None,
             open_project_tempdir: None,
+            spectrogram_texture: None,
         }
     }
 
@@ -111,6 +115,7 @@ impl MainWindow {
                 self.state.audio_buffer = Some(buffer);
                 self.state.audio_player = Some(player);
                 self.state.waveform = Some(waveform);
+                self.spectrogram_texture = None;
                 self.state.error = None;
 
                 if let Some(project_data) = project_data {
@@ -218,8 +223,14 @@ impl eframe::App for MainWindow {
         // Apply theme
         self.theme.apply(ctx);
 
-        // Keep the UI ticking while playback is active without burning CPU at idle.
-        if self.state.is_playing() {
+        // Keep the UI ticking while playback or reference tones are active.
+        let has_active_reference_tone = self
+            .state
+            .audio_player
+            .as_ref()
+            .and_then(|player| player.active_reference_tone_midi())
+            .is_some();
+        if self.state.is_playing() || has_active_reference_tone {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
 
@@ -368,7 +379,7 @@ impl eframe::App for MainWindow {
 
         // Bottom panel - playback controls
         TopBottomPanel::bottom("bottom_panel")
-            .default_height(60.0)
+            .default_height(72.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     // Playback controls
@@ -378,6 +389,21 @@ impl eframe::App for MainWindow {
 
                     // Time display
                     TimeDisplay::new(&self.state, &theme).show(ui);
+
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.add_space(16.0);
+                    ui.label(RichText::new("View").color(text_secondary));
+                    ui.selectable_value(
+                        &mut self.state.visualization_mode,
+                        VisualizationMode::Waveform,
+                        "Waveform",
+                    );
+                    ui.selectable_value(
+                        &mut self.state.visualization_mode,
+                        VisualizationMode::Spectrogram,
+                        "Spectrogram",
+                    );
                 });
             });
 
@@ -388,7 +414,12 @@ impl eframe::App for MainWindow {
 
             if let Some(waveform) = waveform_opt {
                 // Waveform display
-                WaveformDisplay::new(&waveform, &mut self.state, &theme)
+                WaveformDisplay::new(
+                    &waveform,
+                    &mut self.spectrogram_texture,
+                    &mut self.state,
+                    &theme,
+                )
                     .height(ui.available_height() - 20.0)
                     .show(ui);
 
@@ -397,7 +428,7 @@ impl eframe::App for MainWindow {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(
-                            "Space: Play/Pause | Ctrl+S: Save Project | Ctrl+Shift+O: Open Project | Click timeline/waveform: Play from position | Drag waveform: Select loop | Ctrl+Click: Add tag | Click tag: Play | Double-click tag: Rename"
+                            "Space: Play/Pause | Ctrl+S: Save Project | Ctrl+Shift+O: Open Project | Click timeline/view: Play from position | Drag view: Select loop | Ctrl+Click: Add tag | Click tag: Play | Double-click tag: Rename"
                         )
                             .color(text_muted)
                             .size(11.0)
@@ -451,6 +482,7 @@ impl eframe::App for MainWindow {
 
                     for feature in &[
                         "- Waveform visualization with selection",
+                        "- Spectrogram heatmap view with pitch guides",
                         "- Loop region for repeated practice",
                         "- Volume control",
                         "- Left / right / stereo channel selection",

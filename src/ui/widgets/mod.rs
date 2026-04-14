@@ -10,4 +10,4 @@ pub use loop_control::LoopControl;
 pub use playback_controls::PlaybackControls;
 pub use speed_control::SpeedControl;
 pub use time_display::TimeDisplay;
-pub use waveform_display::WaveformDisplay;
+pub use waveform_display::{SpectrogramTextureCache, WaveformDisplay};

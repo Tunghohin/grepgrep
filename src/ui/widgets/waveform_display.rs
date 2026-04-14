@@ -1,58 +1,98 @@
-//! Waveform display widget for egui
+//! Waveform and spectrogram display widget for egui.
 
-use crate::analysis::waveform::WaveformGenerator;
-use crate::state::{AppState, LoopRegion, TimelineTag};
+use crate::analysis::waveform::{SpectrogramPitchAxis, WaveformGenerator};
+use crate::state::{AppState, LoopRegion, TimelineTag, VisualizationMode};
 use crate::ui::theme::Theme;
-use egui::{Area, FontId, Id, Key, Order, Painter, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
+use egui::{
+    Area, Color32, ColorImage, FontId, Id, Key, Order, Painter, Pos2, Rect, Response, Sense,
+    Stroke, TextureHandle, TextureOptions, Ui, Vec2,
+};
 
 const TAG_HIT_RADIUS: f32 = 8.0;
 const TAG_TRIANGLE_SIZE: f32 = 10.0;
 const TAG_TRIANGLE_SIZE_HOVERED: f32 = 14.0;
+const SPECTROGRAM_PIANO_GUTTER_WIDTH: f32 = 72.0;
+const BLACK_KEY_WIDTH_RATIO: f32 = 0.62;
 
-/// Waveform display widget
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpectrogramTextureKey {
+    start_frame: usize,
+    end_frame: usize,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PianoKeyVisual {
+    midi_note: i32,
+    rect: Rect,
+    is_black: bool,
+}
+
+/// Cached texture used to render the current spectrogram viewport.
+pub struct SpectrogramTextureCache {
+    key: SpectrogramTextureKey,
+    texture: TextureHandle,
+}
+
+/// Waveform display widget.
 pub struct WaveformDisplay<'a> {
-    /// Reference to the waveform generator
+    /// Reference to the waveform generator.
     waveform: &'a WaveformGenerator,
-    /// Application state
+    /// Cached spectrogram texture for the current viewport.
+    spectrogram_texture: &'a mut Option<SpectrogramTextureCache>,
+    /// Application state.
     state: &'a mut AppState,
-    /// Theme
+    /// Theme.
     theme: &'a Theme,
-    /// Height of the display
+    /// Height of the display.
     height: f32,
 }
 
 impl<'a> WaveformDisplay<'a> {
-    /// Create a new waveform display
-    pub fn new(waveform: &'a WaveformGenerator, state: &'a mut AppState, theme: &'a Theme) -> Self {
+    /// Create a new waveform display.
+    pub fn new(
+        waveform: &'a WaveformGenerator,
+        spectrogram_texture: &'a mut Option<SpectrogramTextureCache>,
+        state: &'a mut AppState,
+        theme: &'a Theme,
+    ) -> Self {
         Self {
             waveform,
+            spectrogram_texture,
             state,
             theme,
             height: 200.0,
         }
     }
 
-    /// Set the height of the display
+    /// Set the height of the display.
     pub fn height(mut self, height: f32) -> Self {
         self.height = height;
         self
     }
 
-    /// Show the waveform display
+    /// Show the display.
     pub fn show(mut self, ui: &mut Ui) -> Response {
         let available_width = ui.available_width();
+        let is_spectrogram = self.state.visualization_mode == VisualizationMode::Spectrogram;
+        let gutter_width = if is_spectrogram {
+            SPECTROGRAM_PIANO_GUTTER_WIDTH.min((available_width - 40.0).max(0.0))
+        } else {
+            0.0
+        };
 
-        // Top area for seeking (click to play from position)
         let seek_height = 30.0;
         let seek_size = Vec2::new(available_width, seek_height);
         let (seek_response, _) = ui.allocate_painter(seek_size, Sense::click());
-        let seek_rect = seek_response.rect;
+        let full_seek_rect = seek_response.rect;
+        let (_, seek_plot_rect) = split_left_rect(full_seek_rect, gutter_width);
 
-        // Waveform area for loop selection and timeline tags.
         let waveform_height = self.height - seek_height - 20.0;
         let waveform_size = Vec2::new(available_width, waveform_height);
         let (response, painter) = ui.allocate_painter(waveform_size, Sense::click_and_drag());
-        let rect = response.rect;
+        let full_rect = response.rect;
+        let (keyboard_rect, plot_rect) = split_left_rect(full_rect, gutter_width);
         let painter = &painter;
 
         let pointer_pos = response
@@ -60,76 +100,105 @@ impl<'a> WaveformDisplay<'a> {
             .or(seek_response.interact_pointer_pos())
             .or(response.hover_pos())
             .or(seek_response.hover_pos());
-        let hovered_tag_id =
-            pointer_pos.and_then(|pos| self.hit_test_timeline_tag(pos, seek_rect, rect));
+        let hovered_tag_id = pointer_pos.and_then(|pos| {
+            if seek_plot_rect.contains(pos) || plot_rect.contains(pos) {
+                self.hit_test_timeline_tag(pos, seek_plot_rect, plot_rect)
+            } else {
+                None
+            }
+        });
+        let hovered_piano_note = keyboard_rect.and_then(|rect| {
+            response
+                .hover_pos()
+                .filter(|pos| rect.contains(*pos))
+                .and_then(|pos| self.hit_test_piano_key(rect, pos))
+        });
+        let active_reference_note = self
+            .state
+            .audio_player
+            .as_ref()
+            .and_then(|player| player.active_reference_tone_midi());
 
-        self.draw_seek_bar(ui, seek_rect, hovered_tag_id);
+        self.draw_seek_bar(ui, full_seek_rect, seek_plot_rect, hovered_tag_id);
 
-        // Handle tag interactions before seek/loop interactions so Ctrl+click and double-click
-        // on markers do not trigger seek or loop-clearing behavior.
-        let mut consumed =
-            self.handle_tag_interaction(&seek_response, seek_rect, hovered_tag_id, true);
+        let mut consumed = keyboard_rect
+            .map(|rect| self.handle_piano_keyboard_interaction(&response, rect))
+            .unwrap_or(false);
+
         if !consumed {
-            consumed = self.handle_tag_interaction(&response, rect, hovered_tag_id, false);
+            consumed =
+                self.handle_tag_interaction(&seek_response, seek_plot_rect, hovered_tag_id, true);
+        }
+        if !consumed {
+            consumed = self.handle_tag_interaction(&response, plot_rect, hovered_tag_id, false);
+        }
+        if !consumed {
+            self.handle_seek_click(&seek_response, seek_plot_rect);
         }
 
-        if !consumed {
-            self.handle_seek_click(&seek_response, seek_rect);
-        }
+        self.handle_zoom(&response, plot_rect);
 
-        // Handle zoom with scroll wheel
-        self.handle_zoom(&response, rect);
+        painter.rect_filled(full_rect, 0.0, self.theme.waveform_background);
 
-        // Draw waveform background
-        painter.rect_filled(rect, 0.0, self.theme.waveform_background);
-
-        // Draw center line
-        let center_y = rect.center().y;
-        painter.line_segment(
-            [
-                Pos2::new(rect.left(), center_y),
-                Pos2::new(rect.right(), center_y),
-            ],
-            Stroke::new(1.0, self.theme.waveform_center_line),
-        );
-
-        // Generate and draw waveform (with zoom/scroll)
         if self.state.duration > 0.0 {
-            self.draw_waveform_zoomed(painter, rect);
-        }
-
-        // Draw loop region if set
-        if let Some(loop_region) = &self.state.loop_region {
-            if loop_region.enabled {
-                self.draw_loop_region(painter, rect, loop_region);
+            match self.state.visualization_mode {
+                VisualizationMode::Waveform => {
+                    let center_y = plot_rect.center().y;
+                    painter.line_segment(
+                        [
+                            Pos2::new(plot_rect.left(), center_y),
+                            Pos2::new(plot_rect.right(), center_y),
+                        ],
+                        Stroke::new(1.0, self.theme.waveform_center_line),
+                    );
+                    self.draw_waveform_zoomed(painter, plot_rect);
+                }
+                VisualizationMode::Spectrogram => {
+                    if let Some(rect) = keyboard_rect {
+                        self.draw_piano_keyboard(
+                            painter,
+                            rect,
+                            hovered_piano_note,
+                            active_reference_note,
+                        );
+                    }
+                    self.draw_spectrogram_zoomed(ui.ctx(), painter, plot_rect);
+                    self.draw_pitch_guides(painter, plot_rect);
+                }
             }
         }
 
-        // Draw timeline tags over the waveform.
-        self.draw_waveform_tags(painter, rect, hovered_tag_id);
-
-        // Draw playhead
-        self.draw_playhead(painter, rect);
-
-        // Handle waveform interactions (loop selection)
-        if !consumed {
-            self.handle_waveform_interaction(&response, rect);
+        if let Some(loop_region) = &self.state.loop_region {
+            if loop_region.enabled {
+                self.draw_loop_region(painter, plot_rect, loop_region);
+            }
         }
 
-        self.show_timeline_tag_editor(ui.ctx(), seek_rect, rect);
+        self.draw_waveform_tags(painter, plot_rect, hovered_tag_id);
+        self.draw_playhead(painter, plot_rect);
 
-        // Scrollbar for zoomed view
-        self.draw_scrollbar(ui, available_width);
+        if !consumed {
+            self.handle_waveform_interaction(&response, plot_rect);
+        }
+
+        self.show_timeline_tag_editor(ui.ctx(), seek_plot_rect, plot_rect);
+        self.draw_scrollbar(ui, available_width, gutter_width);
 
         response
     }
 
-    fn draw_seek_bar(&self, ui: &Ui, seek_rect: Rect, hovered_tag_id: Option<u64>) {
+    fn draw_seek_bar(
+        &self,
+        ui: &Ui,
+        full_seek_rect: Rect,
+        seek_rect: Rect,
+        hovered_tag_id: Option<u64>,
+    ) {
         ui.painter()
-            .rect_filled(seek_rect, 0.0, self.theme.surface_dark);
+            .rect_filled(full_seek_rect, 0.0, self.theme.surface_dark);
 
         let duration = self.state.duration;
-        if duration <= 0.0 {
+        if duration <= 0.0 || seek_rect.width() <= 0.0 {
             return;
         }
 
@@ -182,6 +251,10 @@ impl<'a> WaveformDisplay<'a> {
     }
 
     fn draw_seek_bar_tags(&self, painter: &Painter, seek_rect: Rect, hovered_tag_id: Option<u64>) {
+        if seek_rect.width() <= 0.0 {
+            return;
+        }
+
         for tag in &self.state.timeline_tags {
             let x = self.tag_x_in_seek_bar(seek_rect, tag.time);
             let is_hovered = Some(tag.id) == hovered_tag_id;
@@ -204,44 +277,68 @@ impl<'a> WaveformDisplay<'a> {
         }
     }
 
-    /// Handle zoom with mouse wheel
-    fn handle_zoom(&mut self, response: &Response, _rect: Rect) {
+    fn handle_zoom(&mut self, response: &Response, rect: Rect) {
+        let hover_pos = response.hover_pos().or(response.interact_pointer_pos());
+        if !hover_pos.is_some_and(|pos| rect.contains(pos)) {
+            return;
+        }
+
         let zoom_delta = response.ctx.input(|i| i.raw_scroll_delta.y);
+        if zoom_delta.abs() <= 0.0 {
+            return;
+        }
 
-        if zoom_delta.abs() > 0.0 {
-            let old_zoom = self.state.zoom;
-            let zoom_factor = if zoom_delta > 0.0 { 1.1 } else { 0.9 };
-            let new_zoom = (old_zoom * zoom_factor as f32).clamp(1.0, 50.0);
-            self.state.zoom = new_zoom;
+        let old_zoom = self.state.zoom;
+        let zoom_factor = if zoom_delta > 0.0 { 1.1 } else { 0.9 };
+        let new_zoom = (old_zoom * zoom_factor as f32).clamp(1.0, 50.0);
+        self.state.zoom = new_zoom;
 
-            if new_zoom > 1.0 {
-                let duration = self.state.duration;
-                let visible_duration = duration / new_zoom as f64;
-                let max_scroll = duration - visible_duration;
-                self.state.scroll_offset = self.state.scroll_offset.min(max_scroll).max(0.0);
-            } else {
-                self.state.scroll_offset = 0.0;
-            }
+        if new_zoom > 1.0 {
+            let duration = self.state.duration;
+            let visible_duration = duration / new_zoom as f64;
+            let max_scroll = duration - visible_duration;
+            self.state.scroll_offset = self.state.scroll_offset.min(max_scroll).max(0.0);
+        } else {
+            self.state.scroll_offset = 0.0;
         }
     }
 
-    /// Draw waveform with zoom support
-    fn draw_waveform_zoomed(&self, painter: &Painter, rect: Rect) {
+    fn visible_frame_window(&self) -> Option<(usize, usize)> {
         let duration = self.state.duration;
+        if duration <= 0.0 {
+            return None;
+        }
+
         let zoom = self.state.zoom;
         let scroll_offset = self.state.scroll_offset;
         let visible_duration = duration / zoom as f64;
         let visible_start = scroll_offset;
         let visible_end = (visible_start + visible_duration).min(duration);
 
-        let rect_width = rect.width().ceil() as usize;
         let total_frames = self.waveform.frame_count();
+        if total_frames == 0 {
+            return None;
+        }
+
         let start_ratio = (visible_start / duration).clamp(0.0, 1.0);
         let end_ratio = (visible_end / duration).clamp(0.0, 1.0);
         let start_frame = (start_ratio * total_frames as f64).floor() as usize;
         let end_frame = ((end_ratio * total_frames as f64).ceil() as usize)
             .max(start_frame.saturating_add(1))
             .min(total_frames);
+
+        Some((start_frame, end_frame))
+    }
+
+    fn draw_waveform_zoomed(&self, painter: &Painter, rect: Rect) {
+        if rect.width() <= 0.0 {
+            return;
+        }
+
+        let rect_width = rect.width().ceil() as usize;
+        let Some((start_frame, end_frame)) = self.visible_frame_window() else {
+            return;
+        };
 
         if let Some(level) = self.waveform.get_window(start_frame, end_frame, rect_width) {
             let points = &level.points;
@@ -263,18 +360,249 @@ impl<'a> WaveformDisplay<'a> {
                     self.theme.waveform_stroke(1.0),
                 );
             }
-        } else {
-            for pixel_x in 0..rect_width {
-                let x = rect.left() + pixel_x as f32;
-                painter.line_segment(
-                    [Pos2::new(x, rect.center().y), Pos2::new(x, rect.center().y)],
-                    self.theme.waveform_stroke(1.0),
-                );
-            }
         }
     }
 
+    fn draw_spectrogram_zoomed(&mut self, ctx: &egui::Context, painter: &Painter, rect: Rect) {
+        if rect.width() <= 0.0 || rect.height() <= 0.0 {
+            return;
+        }
+
+        let rect_width = rect.width().ceil() as usize;
+        let rect_height = rect.height().ceil() as usize;
+        let Some((start_frame, end_frame)) = self.visible_frame_window() else {
+            return;
+        };
+
+        let Some(view) =
+            self.waveform
+                .get_spectrogram_window(start_frame, end_frame, rect_width, rect_height)
+        else {
+            return;
+        };
+
+        if view.intensities.is_empty() {
+            return;
+        }
+
+        let key = SpectrogramTextureKey {
+            start_frame,
+            end_frame,
+            width: view.width,
+            height: view.height,
+        };
+
+        let needs_upload = self
+            .spectrogram_texture
+            .as_ref()
+            .map(|cache| cache.key != key)
+            .unwrap_or(true);
+
+        if needs_upload {
+            let pixels = view
+                .intensities
+                .iter()
+                .map(|&value| self.theme.spectrogram_color(value as f32 / 255.0))
+                .collect::<Vec<_>>();
+            let image = ColorImage {
+                size: [view.width, view.height],
+                pixels,
+            };
+
+            if let Some(cache) = self.spectrogram_texture.as_mut() {
+                cache.key = key;
+                cache.texture.set(image, TextureOptions::NEAREST);
+            } else {
+                let texture = ctx.load_texture("spectrogram_view", image, TextureOptions::NEAREST);
+                *self.spectrogram_texture = Some(SpectrogramTextureCache { key, texture });
+            }
+        }
+
+        if let Some(cache) = self.spectrogram_texture.as_ref() {
+            painter.image(
+                cache.texture.id(),
+                rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+    }
+
+    fn draw_pitch_guides(&self, painter: &Painter, rect: Rect) {
+        let Some(axis) = self.waveform.spectrogram_pitch_axis() else {
+            return;
+        };
+
+        for midi_note in axis.min_midi_note..=axis.max_midi_note {
+            let cent = midi_note as f32 * 100.0;
+            if cent < axis.min_pitch_cents || cent > axis.max_pitch_cents {
+                continue;
+            }
+
+            let y = cent_to_y(rect, axis, cent);
+            let stroke = Stroke::new(
+                if midi_note % 12 == 0 || midi_note == 69 {
+                    1.0
+                } else {
+                    0.6
+                },
+                self.theme.spectrogram_grid,
+            );
+            painter.line_segment(
+                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                stroke,
+            );
+        }
+    }
+
+    fn draw_piano_keyboard(
+        &self,
+        painter: &Painter,
+        rect: Rect,
+        hovered_note: Option<i32>,
+        active_note: Option<i32>,
+    ) {
+        painter.rect_filled(rect, 0.0, self.theme.surface_dark);
+
+        let Some(axis) = self.waveform.spectrogram_pitch_axis() else {
+            return;
+        };
+
+        for midi_note in axis.min_midi_note..=axis.max_midi_note {
+            if is_black_key(midi_note) {
+                continue;
+            }
+
+            let Some(key) = self.piano_key_visual(rect, axis, midi_note) else {
+                continue;
+            };
+            let fill = if active_note == Some(midi_note) {
+                self.theme.piano_white_key_active
+            } else if hovered_note == Some(midi_note) {
+                self.theme.piano_white_key_hover
+            } else {
+                self.theme.piano_white_key
+            };
+            painter.rect_filled(key.rect, 0.0, fill);
+            painter.rect_stroke(key.rect, 0.0, Stroke::new(1.0, self.theme.piano_key_border));
+
+            if midi_note % 12 == 0 || midi_note == 69 {
+                painter.text(
+                    Pos2::new(key.rect.left() + 6.0, key.rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    midi_to_note_label(midi_note),
+                    FontId::proportional(11.0),
+                    self.theme.surface_dark,
+                );
+            }
+        }
+
+        for midi_note in axis.min_midi_note..=axis.max_midi_note {
+            if !is_black_key(midi_note) {
+                continue;
+            }
+
+            let Some(key) = self.piano_key_visual(rect, axis, midi_note) else {
+                continue;
+            };
+            let fill = if active_note == Some(midi_note) {
+                self.theme.piano_black_key_active
+            } else if hovered_note == Some(midi_note) {
+                self.theme.piano_black_key_hover
+            } else {
+                self.theme.piano_black_key
+            };
+            painter.rect_filled(key.rect, 2.0, fill);
+            painter.rect_stroke(key.rect, 2.0, Stroke::new(1.0, self.theme.piano_key_border));
+        }
+    }
+
+    fn piano_key_visual(
+        &self,
+        rect: Rect,
+        axis: SpectrogramPitchAxis,
+        midi_note: i32,
+    ) -> Option<PianoKeyVisual> {
+        let note_low = midi_note as f32 * 100.0;
+        let note_high = note_low + 100.0;
+        let visible_low = note_low.max(axis.min_pitch_cents);
+        let visible_high = note_high.min(axis.max_pitch_cents);
+        if visible_high <= visible_low {
+            return None;
+        }
+
+        let top = cent_to_y(rect, axis, visible_high);
+        let bottom = cent_to_y(rect, axis, visible_low);
+        let is_black = is_black_key(midi_note);
+        let key_rect = if is_black {
+            let width = rect.width() * BLACK_KEY_WIDTH_RATIO;
+            Rect::from_min_max(
+                Pos2::new(rect.right() - width, top),
+                Pos2::new(rect.right(), bottom),
+            )
+        } else {
+            Rect::from_min_max(Pos2::new(rect.left(), top), Pos2::new(rect.right(), bottom))
+        };
+
+        Some(PianoKeyVisual {
+            midi_note,
+            rect: key_rect,
+            is_black,
+        })
+    }
+
+    fn hit_test_piano_key(&self, rect: Rect, pointer_pos: Pos2) -> Option<i32> {
+        let axis = self.waveform.spectrogram_pitch_axis()?;
+
+        for midi_note in axis.min_midi_note..=axis.max_midi_note {
+            let Some(key) = self.piano_key_visual(rect, axis, midi_note) else {
+                continue;
+            };
+            if key.is_black && key.rect.contains(pointer_pos) {
+                return Some(key.midi_note);
+            }
+        }
+
+        for midi_note in axis.min_midi_note..=axis.max_midi_note {
+            let Some(key) = self.piano_key_visual(rect, axis, midi_note) else {
+                continue;
+            };
+            if !key.is_black && key.rect.contains(pointer_pos) {
+                return Some(key.midi_note);
+            }
+        }
+
+        None
+    }
+
+    fn handle_piano_keyboard_interaction(&mut self, response: &Response, rect: Rect) -> bool {
+        if !response.clicked() {
+            return false;
+        }
+
+        let Some(pointer_pos) = response.interact_pointer_pos() else {
+            return false;
+        };
+        if !rect.contains(pointer_pos) {
+            return false;
+        }
+
+        let Some(midi_note) = self.hit_test_piano_key(rect, pointer_pos) else {
+            return false;
+        };
+        let Some(player) = &self.state.audio_player else {
+            return false;
+        };
+
+        player.trigger_reference_tone(midi_note);
+        true
+    }
+
     fn draw_waveform_tags(&self, painter: &Painter, rect: Rect, hovered_tag_id: Option<u64>) {
+        if rect.width() <= 0.0 {
+            return;
+        }
+
         for tag in &self.state.timeline_tags {
             let Some(x) = self.tag_x_in_waveform(rect, tag.time) else {
                 continue;
@@ -344,8 +672,7 @@ impl<'a> WaveformDisplay<'a> {
         );
     }
 
-    /// Draw scrollbar for zoomed view
-    fn draw_scrollbar(&mut self, ui: &mut Ui, width: f32) {
+    fn draw_scrollbar(&mut self, ui: &mut Ui, width: f32, gutter_width: f32) {
         let duration = self.state.duration;
         if duration <= 0.0 || self.state.zoom <= 1.0 {
             return;
@@ -354,32 +681,36 @@ impl<'a> WaveformDisplay<'a> {
         let zoom = self.state.zoom;
         let scroll_offset = self.state.scroll_offset;
         let visible_duration = duration / zoom as f64;
-
         let scrollbar_height = 15.0;
-        let scrollbar_rect =
-            Rect::from_min_size(ui.cursor().min, Vec2::new(width, scrollbar_height));
+        let full_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(width, scrollbar_height));
+        let (_, plot_rect) = split_left_rect(full_rect, gutter_width);
 
         ui.painter()
-            .rect_filled(scrollbar_rect, 0.0, self.theme.surface_dark);
+            .rect_filled(full_rect, 0.0, self.theme.surface_dark);
 
-        let thumb_start = (scroll_offset / duration) as f32 * width;
-        let thumb_width = (visible_duration / duration) as f32 * width;
+        if plot_rect.width() <= 0.0 {
+            ui.allocate_rect(full_rect, Sense::hover());
+            return;
+        }
+
+        let thumb_start = (scroll_offset / duration) as f32 * plot_rect.width();
+        let thumb_width = (visible_duration / duration) as f32 * plot_rect.width();
         let thumb_rect = Rect::from_min_size(
-            Pos2::new(
-                scrollbar_rect.left() + thumb_start,
-                scrollbar_rect.top() + 2.0,
-            ),
+            Pos2::new(plot_rect.left() + thumb_start, plot_rect.top() + 2.0),
             Vec2::new(thumb_width, scrollbar_height - 4.0),
         );
 
         ui.painter()
             .rect_filled(thumb_rect, 2.0, self.theme.surface_light);
 
-        let scrollbar_response = ui.allocate_rect(scrollbar_rect, Sense::click_and_drag());
-
-        if scrollbar_response.dragged() || scrollbar_response.clicked() {
+        let scrollbar_response = ui.allocate_rect(full_rect, Sense::click_and_drag());
+        if (scrollbar_response.dragged() || scrollbar_response.clicked())
+            && scrollbar_response
+                .interact_pointer_pos()
+                .is_some_and(|pos| plot_rect.contains(pos))
+        {
             if let Some(pos) = scrollbar_response.interact_pointer_pos() {
-                let x_ratio = (pos.x - scrollbar_rect.left()) / scrollbar_rect.width();
+                let x_ratio = ((pos.x - plot_rect.left()) / plot_rect.width()).clamp(0.0, 1.0);
                 let new_offset = (x_ratio as f64 * duration - visible_duration / 2.0)
                     .clamp(0.0, duration - visible_duration);
                 self.state.scroll_offset = new_offset;
@@ -395,81 +726,80 @@ impl<'a> WaveformDisplay<'a> {
         full_duration_scale: bool,
     ) -> bool {
         let duration = self.state.duration;
-        if duration <= 0.0 {
+        if duration <= 0.0 || rect.width() <= 0.0 {
             return false;
         }
 
         let modifiers = response.ctx.input(|i| i.modifiers);
 
-        if response.double_clicked() {
+        if response.double_clicked()
+            && hovered_tag_id.is_some()
+            && response
+                .interact_pointer_pos()
+                .is_some_and(|pos| rect.contains(pos))
+        {
+            self.state
+                .begin_timeline_tag_edit(hovered_tag_id.expect("checked above"));
+            return true;
+        }
+
+        if response.clicked()
+            && response
+                .interact_pointer_pos()
+                .is_some_and(|pos| rect.contains(pos))
+        {
+            let pos = response.interact_pointer_pos().expect("checked above");
+            if modifiers.ctrl {
+                let time = if full_duration_scale {
+                    self.seek_bar_x_to_time(rect, pos.x)
+                } else {
+                    self.waveform_x_to_time(rect, pos.x)
+                };
+                self.state.add_timeline_tag(time);
+                return true;
+            }
+
             if let Some(tag_id) = hovered_tag_id {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    if rect.contains(pos) {
-                        self.state.begin_timeline_tag_edit(tag_id);
-                        return true;
-                    }
-                }
-            }
-        }
-
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if rect.contains(pos) {
-                    if modifiers.ctrl {
-                        let time = if full_duration_scale {
-                            self.seek_bar_x_to_time(rect, pos.x)
-                        } else {
-                            self.waveform_x_to_time(rect, pos.x)
-                        };
-                        self.state.add_timeline_tag(time);
-                        return true;
-                    }
-
-                    if let Some(tag_id) = hovered_tag_id {
-                        if let Some(tag) = self.state.timeline_tag(tag_id) {
-                            self.state.seek(tag.time);
-                            self.state.sync_loop_state();
-
-                            if let Some(player) = &self.state.audio_player {
-                                let _ = player.play();
-                            }
-                        }
-
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
-    }
-
-    /// Handle seek bar click - play from position
-    fn handle_seek_click(&mut self, response: &Response, rect: Rect) {
-        let duration = self.state.duration;
-        if duration <= 0.0 {
-            return;
-        }
-
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if rect.contains(pos) {
-                    let time = self.seek_bar_x_to_time(rect, pos.x);
-                    self.state.seek(time);
+                if let Some(tag) = self.state.timeline_tag(tag_id) {
+                    self.state.seek(tag.time);
                     self.state.sync_loop_state();
 
                     if let Some(player) = &self.state.audio_player {
                         let _ = player.play();
                     }
                 }
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn handle_seek_click(&mut self, response: &Response, rect: Rect) {
+        let duration = self.state.duration;
+        if duration <= 0.0 || rect.width() <= 0.0 {
+            return;
+        }
+
+        if response.clicked()
+            && response
+                .interact_pointer_pos()
+                .is_some_and(|pos| rect.contains(pos))
+        {
+            let pos = response.interact_pointer_pos().expect("checked above");
+            let time = self.seek_bar_x_to_time(rect, pos.x);
+            self.state.seek(time);
+            self.state.sync_loop_state();
+
+            if let Some(player) = &self.state.audio_player {
+                let _ = player.play();
             }
         }
     }
 
-    /// Handle waveform interactions - loop selection by dragging on waveform
     fn handle_waveform_interaction(&mut self, response: &Response, rect: Rect) {
         let duration = self.state.duration;
-        if duration <= 0.0 {
+        if duration <= 0.0 || rect.width() <= 0.0 {
             return;
         }
 
@@ -479,14 +809,11 @@ impl<'a> WaveformDisplay<'a> {
 
         let pointer_pos = response.interact_pointer_pos().or(response.hover_pos());
 
-        if response.drag_started() {
+        if response.drag_started() && pointer_pos.is_some_and(|pos| rect.contains(pos)) {
             if let Some(pos) = pointer_pos {
-                if rect.contains(pos) {
-                    let time = self.waveform_x_to_time(rect, pos.x);
-                    self.state.loop_selection_start = Some(time);
-                    self.state.selecting_loop = true;
-                    tracing::debug!("Loop selection started at: {}", time);
-                }
+                let time = self.waveform_x_to_time(rect, pos.x);
+                self.state.loop_selection_start = Some(time);
+                self.state.selecting_loop = true;
             }
         }
 
@@ -515,29 +842,35 @@ impl<'a> WaveformDisplay<'a> {
         }
 
         if response.double_clicked() {
-            self.state.clear_loop();
+            if response
+                .interact_pointer_pos()
+                .is_some_and(|pos| rect.contains(pos))
+                || response.hover_pos().is_some_and(|pos| rect.contains(pos))
+            {
+                self.state.clear_loop();
+            }
             return;
         }
 
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if rect.contains(pos) {
-                    let time = self.waveform_x_to_time(rect, pos.x);
-                    self.state.seek(time);
-                    self.state.sync_loop_state();
+        if response.clicked()
+            && response
+                .interact_pointer_pos()
+                .is_some_and(|pos| rect.contains(pos))
+        {
+            let pos = response.interact_pointer_pos().expect("checked above");
+            let time = self.waveform_x_to_time(rect, pos.x);
+            self.state.seek(time);
+            self.state.sync_loop_state();
 
-                    if let Some(player) = &self.state.audio_player {
-                        let _ = player.play();
-                    }
-                }
+            if let Some(player) = &self.state.audio_player {
+                let _ = player.play();
             }
         }
     }
 
-    /// Draw loop region
     fn draw_loop_region(&self, painter: &Painter, rect: Rect, loop_region: &LoopRegion) {
         let duration = self.state.duration;
-        if duration <= 0.0 {
+        if duration <= 0.0 || rect.width() <= 0.0 {
             return;
         }
 
@@ -557,7 +890,6 @@ impl<'a> WaveformDisplay<'a> {
 
         let start_x = start_x.max(rect.left());
         let end_x = end_x.min(rect.right());
-
         if end_x <= start_x {
             return;
         }
@@ -584,19 +916,17 @@ impl<'a> WaveformDisplay<'a> {
         );
     }
 
-    /// Draw playhead
     fn draw_playhead(&self, painter: &Painter, rect: Rect) {
         let duration = self.state.duration;
-        if duration <= 0.0 {
+        if duration <= 0.0 || rect.width() <= 0.0 {
             return;
         }
 
         let zoom = self.state.zoom;
         let scroll_offset = self.state.scroll_offset;
         let visible_duration = duration / zoom as f64;
-        let width = rect.width();
         let position = self.state.position;
-        let x = rect.left() + ((position - scroll_offset) / visible_duration) as f32 * width;
+        let x = rect.left() + ((position - scroll_offset) / visible_duration) as f32 * rect.width();
 
         if x < rect.left() || x > rect.right() {
             return;
@@ -730,6 +1060,10 @@ impl<'a> WaveformDisplay<'a> {
     }
 
     fn tag_x_in_waveform(&self, rect: Rect, time: f64) -> Option<f32> {
+        if rect.width() <= 0.0 {
+            return None;
+        }
+
         let visible_duration = self.state.duration / self.state.zoom as f64;
         let visible_start = self.state.scroll_offset;
         let visible_end = visible_start + visible_duration;
@@ -753,7 +1087,41 @@ impl<'a> WaveformDisplay<'a> {
     }
 }
 
-/// Format time for display (mm:ss or ss)
+fn split_left_rect(rect: Rect, left_width: f32) -> (Option<Rect>, Rect) {
+    let left_width = left_width.clamp(0.0, rect.width());
+    if left_width <= 0.0 {
+        return (None, rect);
+    }
+
+    let split_x = rect.left() + left_width;
+    (
+        Some(Rect::from_min_max(
+            rect.min,
+            Pos2::new(split_x, rect.bottom()),
+        )),
+        Rect::from_min_max(Pos2::new(split_x, rect.top()), rect.max),
+    )
+}
+
+fn cent_to_y(rect: Rect, axis: SpectrogramPitchAxis, cent: f32) -> f32 {
+    let ratio = ((cent - axis.min_pitch_cents) / axis.pitch_span_cents()).clamp(0.0, 1.0);
+    rect.bottom() - ratio * rect.height()
+}
+
+fn is_black_key(midi_note: i32) -> bool {
+    matches!(midi_note.rem_euclid(12), 1 | 3 | 6 | 8 | 10)
+}
+
+fn midi_to_note_label(midi_note: i32) -> String {
+    const NOTE_NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+
+    let note_name = NOTE_NAMES[midi_note.rem_euclid(12) as usize];
+    let octave = midi_note.div_euclid(12) - 1;
+    format!("{note_name}{octave}")
+}
+
 fn format_time(seconds: f64) -> String {
     let total_secs = seconds as u64;
     let minutes = total_secs / 60;

@@ -7,4 +7,4 @@
 
 pub mod app_state;
 
-pub use app_state::{AppState, LoopRegion, TimelineTag};
+pub use app_state::{AppState, LoopRegion, TimelineTag, VisualizationMode};

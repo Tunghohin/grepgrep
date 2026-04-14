@@ -10,6 +10,15 @@ use crate::analysis::WaveformGenerator;
 use crate::audio::{AudioBuffer, AudioChannelMode, AudioPlayer};
 use crate::project::ProjectData;
 
+/// Main visualization mode shown in the center panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualizationMode {
+    #[default]
+    Waveform,
+    Spectrogram,
+}
+
 /// Loop region state
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct LoopRegion {
@@ -61,6 +70,8 @@ pub struct AppState {
     pub audio_player: Option<Rc<AudioPlayer>>,
     /// Waveform generator
     pub waveform: Option<Arc<WaveformGenerator>>,
+    /// Active visualization in the center panel.
+    pub visualization_mode: VisualizationMode,
     /// Current playback position in seconds
     pub position: f64,
     /// Total duration in seconds
@@ -103,6 +114,7 @@ impl Default for AppState {
             audio_buffer: None,
             audio_player: None,
             waveform: None,
+            visualization_mode: VisualizationMode::Waveform,
             position: 0.0,
             duration: 0.0,
             volume: 1.0,
@@ -132,6 +144,7 @@ impl AppState {
     /// Reset view and annotation state for a newly loaded audio file.
     pub fn reset_project_state(&mut self) {
         self.position = 0.0;
+        self.visualization_mode = VisualizationMode::Waveform;
         self.loop_region = None;
         self.selecting_loop = false;
         self.loop_selection_start = None;
@@ -173,6 +186,7 @@ impl AppState {
             1.0
         });
         self.set_channel_mode(project.channel_mode);
+        self.visualization_mode = project.visualization_mode;
 
         self.zoom = if project.zoom.is_finite() {
             project.zoom.clamp(1.0, 50.0)
@@ -533,6 +547,7 @@ mod tests {
             }),
             speed: 1.25,
             channel_mode: AudioChannelMode::Right,
+            visualization_mode: VisualizationMode::Spectrogram,
             zoom: 4.0,
             scroll_offset: 3.0,
             last_position: Some(6.5),
@@ -551,6 +566,7 @@ mod tests {
         );
         assert!((state.speed - 1.25).abs() < 0.001);
         assert_eq!(state.channel_mode, AudioChannelMode::Right);
+        assert_eq!(state.visualization_mode, VisualizationMode::Spectrogram);
         assert!((state.zoom - 4.0).abs() < 0.001);
         assert!((state.scroll_offset - 3.0).abs() < 0.001);
         assert!((state.position - 6.5).abs() < 0.001);

@@ -8,6 +8,10 @@
 
 It is designed for learning songs by ear, slowing audio down without changing pitch, viewing the waveform, looping difficult sections, and navigating quickly while practicing or transcribing.
 
+<p align="center">
+  <img src="assets/example.png" width="100%" alt="grepgrep spectrogram view" />
+</p>
+
 ## Features
 
 - waveform display

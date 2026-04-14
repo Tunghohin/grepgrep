@@ -22,6 +22,17 @@ pub struct Theme {
     pub waveform_center_line: Color32,
     pub waveform_selection: Color32,
     pub waveform_playhead: Color32,
+    pub spectrogram_low: Color32,
+    pub spectrogram_mid: Color32,
+    pub spectrogram_high: Color32,
+    pub spectrogram_grid: Color32,
+    pub piano_white_key: Color32,
+    pub piano_white_key_hover: Color32,
+    pub piano_white_key_active: Color32,
+    pub piano_black_key: Color32,
+    pub piano_black_key_hover: Color32,
+    pub piano_black_key_active: Color32,
+    pub piano_key_border: Color32,
 
     // Text colors
     pub text: Color32,
@@ -55,6 +66,17 @@ impl Default for Theme {
             waveform_center_line: Color32::from_rgb(60, 60, 70),
             waveform_selection: Color32::from_rgba_unmultiplied(0, 180, 180, 80),
             waveform_playhead: Color32::from_rgb(255, 100, 100),
+            spectrogram_low: Color32::from_rgb(18, 50, 136),
+            spectrogram_mid: Color32::from_rgb(36, 196, 126),
+            spectrogram_high: Color32::from_rgb(255, 232, 92),
+            spectrogram_grid: Color32::from_rgba_unmultiplied(220, 240, 255, 40),
+            piano_white_key: Color32::from_rgb(236, 238, 241),
+            piano_white_key_hover: Color32::from_rgb(248, 250, 252),
+            piano_white_key_active: Color32::from_rgb(170, 238, 228),
+            piano_black_key: Color32::from_rgb(22, 28, 38),
+            piano_black_key_hover: Color32::from_rgb(34, 42, 56),
+            piano_black_key_active: Color32::from_rgb(0, 170, 160),
+            piano_key_border: Color32::from_rgba_unmultiplied(6, 10, 16, 180),
 
             // Text
             text: Color32::from_rgb(240, 240, 245),
@@ -104,8 +126,52 @@ impl Theme {
         Stroke::new(width, self.waveform)
     }
 
+    /// Convert a normalized spectrogram intensity into the heatmap palette.
+    pub fn spectrogram_color(&self, intensity: f32) -> Color32 {
+        let intensity = intensity.clamp(0.0, 1.0);
+        if intensity <= 0.18 {
+            lerp_color(
+                self.waveform_background,
+                self.spectrogram_low,
+                intensity / 0.18,
+            )
+        } else if intensity <= 0.45 {
+            lerp_color(
+                self.spectrogram_low,
+                self.spectrogram_mid,
+                (intensity - 0.18) / 0.27,
+            )
+        } else if intensity <= 0.72 {
+            lerp_color(
+                self.spectrogram_mid,
+                Color32::from_rgb(240, 74, 74),
+                (intensity - 0.45) / 0.27,
+            )
+        } else {
+            lerp_color(
+                Color32::from_rgb(255, 170, 60),
+                self.spectrogram_high,
+                (intensity - 0.72) / 0.28,
+            )
+        }
+    }
+
     /// Get stroke for selection outline
     pub fn selection_stroke(&self) -> Stroke {
         Stroke::new(2.0, self.accent)
     }
+}
+
+fn lerp_color(from: Color32, to: Color32, amount: f32) -> Color32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let lerp = |start: u8, end: u8| -> u8 {
+        (start as f32 + (end as f32 - start as f32) * amount).round() as u8
+    };
+
+    Color32::from_rgba_unmultiplied(
+        lerp(from.r(), to.r()),
+        lerp(from.g(), to.g()),
+        lerp(from.b(), to.b()),
+        lerp(from.a(), to.a()),
+    )
 }

@@ -14,7 +14,7 @@ use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::audio::AudioChannelMode;
-use crate::state::{AppState, LoopRegion, TimelineTag};
+use crate::state::{AppState, LoopRegion, TimelineTag, VisualizationMode};
 
 pub const PROJECT_FILE_NAME: &str = "project.json";
 const PROJECT_VERSION: u32 = 1;
@@ -28,6 +28,8 @@ pub struct ProjectData {
     pub loop_region: Option<LoopRegion>,
     pub speed: f32,
     pub channel_mode: AudioChannelMode,
+    #[serde(default)]
+    pub visualization_mode: VisualizationMode,
     pub zoom: f32,
     pub scroll_offset: f64,
     pub last_position: Option<f64>,
@@ -42,6 +44,7 @@ impl ProjectData {
             loop_region: state.loop_region,
             speed: state.speed,
             channel_mode: state.channel_mode,
+            visualization_mode: state.visualization_mode,
             zoom: state.zoom,
             scroll_offset: state.scroll_offset,
             last_position: Some(state.position),
@@ -312,6 +315,7 @@ mod tests {
         state.duration = 120.0;
         state.position = 12.5;
         state.speed = 0.75;
+        state.visualization_mode = VisualizationMode::Spectrogram;
         state.zoom = 2.5;
         state.scroll_offset = 8.0;
         state.timeline_tags = vec![TimelineTag {
@@ -342,6 +346,10 @@ mod tests {
         assert_eq!(loaded.data.timeline_tags[0].name, "Verse");
         assert_eq!(loaded.data.loop_region.unwrap().start, 10.0);
         assert!((loaded.data.speed - 0.75).abs() < 0.001);
+        assert_eq!(
+            loaded.data.visualization_mode,
+            VisualizationMode::Spectrogram
+        );
         assert!((loaded.data.zoom - 2.5).abs() < 0.001);
         assert!((loaded.data.scroll_offset - 8.0).abs() < 0.001);
         assert_eq!(loaded.data.last_position, Some(12.5));
@@ -362,6 +370,7 @@ mod tests {
             loop_region: None,
             speed: 1.0,
             channel_mode: AudioChannelMode::Stereo,
+            visualization_mode: VisualizationMode::Waveform,
             zoom: 1.0,
             scroll_offset: 0.0,
             last_position: None,
